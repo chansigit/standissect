@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import anndata as ad
+import pandas as pd
 import pytest
 
 from standissect.pipeline import (run_dissect_pipeline, _Layout,
@@ -86,6 +88,28 @@ def test_pipeline_idempotent(small_adata, tmp_path):
     # cached artifacts not rewritten
     for p, mt in mtimes.items():
         assert p.stat().st_mtime == mt, f'{p} was rewritten'
+
+
+def test_pipeline_persists_overwritten_labels_to_h5ad(small_adata, tmp_path):
+    small_adata.obs['umap_cluster'] = 'stale_umap'
+    small_adata.obs['original_cluster_split'] = 'stale_split'
+    labeled_path = tmp_path / 'labeled.h5ad'
+
+    result = run_dissect_pipeline(
+        small_adata, cluster_col='leiden', output_dir=str(tmp_path),
+        cat_cols=('orig.ident', 'batch'), target_k=4, n_jobs=1,
+        labeled_h5ad_path=labeled_path,
+    )
+
+    reread = ad.read_h5ad(labeled_path)
+    labels = pd.read_csv(Path(result['root']) / 'cell_labels.tsv',
+                         sep='\t', index_col=0)
+    assert 'stale_split' not in set(reread.obs['original_cluster_split'].astype(str))
+    assert 'stale_umap' not in set(reread.obs['umap_cluster'].astype(str))
+    assert reread.obs['original_cluster_split'].astype(str).tolist() == \
+        labels['original_cluster_split'].astype(str).tolist()
+    assert reread.obs['umap_cluster'].astype(str).tolist() == \
+        labels['umap_cluster'].astype(str).tolist()
 
 
 def test_pipeline_force_all(small_adata, tmp_path):

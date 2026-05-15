@@ -100,6 +100,16 @@ def _concat_tsvs(paths):
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
+def _write_h5ad_atomic(adata, path):
+    """Write an AnnData file via a same-directory temporary file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    adata.write_h5ad(tmp)
+    tmp.replace(path)
+    return path
+
+
 def _persist_cluster(adata, res, *, cdir, umap_key, cluster_col, size_rank_name):
     """Write one cluster's dissect outputs into ``cdir`` (= clusters/cN/)."""
     import matplotlib
@@ -224,6 +234,7 @@ def run_dissect_pipeline(
     *,
     cluster_col,
     output_dir,
+    labeled_h5ad_path=None,
     umap_key='X_umap',
     cat_cols=('orig.ident', 'batch'),
     qc_cols=('percent.mt', 'nCount_RNA', 'nFeature_RNA', 'hybrid_score'),
@@ -243,8 +254,10 @@ def run_dissect_pipeline(
 
     Idempotent: a unit is skipped when its primary output file already exists and
     the unit is not named in ``force`` (a subset of {'partition','dissect',
-    'canonical','anatomy'}, or 'all'). The input ``adata`` is not written to disk;
-    recomputed labels go to ``cell_labels.tsv``.
+    'canonical','anatomy'}, or 'all'). Existing ``adata.obs['umap_cluster']`` and
+    ``adata.obs['original_cluster_split']`` are overwritten in memory. Recomputed
+    labels always go to ``cell_labels.tsv``; pass ``labeled_h5ad_path`` to also
+    persist those overwritten obs columns to an h5ad file.
 
     Stages run serially; stage 3's Wilcoxon is gene-chunked to bound memory.
     ``n_jobs`` is currently unused (reserved).
@@ -411,6 +424,10 @@ def run_dissect_pipeline(
         'random_state': random_state, 'n_jobs': n_jobs, 'force': sorted(force),
         'partition_info': partition_info,
     }, default=str, indent=2))
+
+    if labeled_h5ad_path is not None:
+        written = _write_h5ad_atomic(adata, labeled_h5ad_path)
+        print(f"[pipeline] wrote labeled h5ad to {written}", flush=True)
 
     return {'root': str(lay.root), 'crosstab': crosstab, 'panel': panel,
             'partition_info': partition_info, 'canonical_deg': canonical_deg,

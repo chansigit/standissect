@@ -24,7 +24,7 @@ from .cluster import (
 from .pipeline import run_dissect_pipeline
 from .report import build_report
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = [
     "run_dissect_pipeline",
     "build_report",

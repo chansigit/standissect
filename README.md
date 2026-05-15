@@ -30,6 +30,7 @@ result = run_dissect_pipeline(
     adata,
     cluster_col="leiden",
     output_dir="results/dissect",
+    labeled_h5ad_path="my_data.with_dissect_labels.h5ad",
     cat_cols=("orig.ident", "batch"),       # any project-specific obs columns
     qc_cols=("percent.mt", "nCount_RNA", "nFeature_RNA", "hybrid_score"),
     sample_col="orig.ident",
@@ -41,6 +42,9 @@ The pipeline is **idempotent** — re-running skips stages whose output files
 already exist. Pass `force=("partition", "dissect", "canonical", "anatomy")`
 (or `"all"`) to recompute. No dataset-specific column names are hardcoded; the
 caller supplies `cat_cols` / `qc_cols` / `sample_col`.
+Existing `adata.obs["umap_cluster"]` and
+`adata.obs["original_cluster_split"]` are overwritten in memory. Pass
+`labeled_h5ad_path` to persist those current labels to disk.
 
 ## Output tree
 
