@@ -68,15 +68,74 @@ ends up with two new labels: `obs['umap_cluster']` (the global re-partition) and
 `obs['original_cluster_split']` (the `c{cluster}_{rank}` name). The full
 cluster × re-partition contingency table is written to `crosstab.tsv`.
 
-The pipeline runs in four stages — each independently skippable via `force=`
-(see [Re-running](#re-running)):
+The full run is formulated step by step in [Pipeline — end to end](#pipeline--end-to-end).
 
-1. **partition** — kNN + Leiden on the 2-D UMAP → the re-partition above.
-2. **dissect** — per cluster: find minors, run DEG vs the core, measure
-   composition + QC drift, assign a `likely_cause`.
-3. **canonical** — canonical-core markers per cluster: what each *clean* core is.
-4. **anatomy** — a per-cluster heatmap placing each minor against the core's
-   markers and QC.
+## Pipeline — end to end
+
+```
+AnnData (X_umap + clustering)
+  └─▶ 1. re-partition  ─▶ 2. crosstab + c{cluster}_{rank} naming
+        └─▶ 3. dissect minors  (DEG · composition · QC · verdict)
+              └─▶ 4. canonical-core markers ─▶ 5. anatomy heatmaps
+                    └─▶ 6. assemble panel / params ─▶ 7. report.html
+```
+
+Each numbered step writes its result to the [output tree](#output-tree) and is
+**skipped when that output already exists** (see [Re-running](#re-running)); the
+stage tags `partition` / `dissect` / `canonical` / `anatomy` are the names you
+pass to `force=`.
+
+**0 · Preconditions.** `obsm[umap_key]` and `obs[cluster_col]` must exist, or the
+run aborts with `KeyError`. Nothing is embedded or clustered from scratch.
+
+**1 · UMAP-Leiden partition** *(stage `partition`)* — build a kNN graph
+(`n_neighbors`, default 30) on the 2-D UMAP and run Leiden. If `target_k` is set
+(default = the number of original clusters), binary-search `resolution` until the
+partition lands within `target_tol` (default 2) clusters of `target_k`, capped at
+12 iterations. → per-cell `obs['umap_cluster']` (`u0, u1, …`).
+
+**2 · Crosstab + Cartesian naming** *(always — cheap)* — cross-tabulate
+`cluster_col × umap_cluster` → `crosstab.tsv`. Within each original cluster, rank
+its UMAP fragments by size and name them `c{cluster}_{rank}` (rank 0 = largest =
+**main core**). → `obs['original_cluster_split']`, `cell_labels.tsv`.
+
+**3 · Per-cluster dissection** *(stage `dissect`, one cluster at a time)* — for
+each original cluster, with **main** = `c{cluster}_0` and **minors** = the
+off-main fragments holding ≥ `min_subcluster_size` (default 50) cells:
+
+- **DEG** — minor vs main core, a vectorised Mann-Whitney (Wilcoxon rank-sum) on
+  `adata.X` (or `deg_layer`); keep the top `top_n_deg` genes. A gene counts as
+  *significant* when `pvals_adj < 0.05` **and** `|log2FC| > 0.5` (BH-FDR).
+- **Composition drift** — for every `cat_cols` column, a 2×2 Fisher exact per
+  category (minor vs main, this category vs the rest; Haldane–Anscombe `+0.5`,
+  BH-FDR), reported as a log2 odds ratio.
+- **QC drift** — for every `qc_cols` column, a Mann-Whitney of minor vs main
+  (BH-FDR), recording the mean shift `Δ` and its relative size.
+- **Verdict** — fold the strongest sample-enrichment and QC-drift signals
+  together with the DEG count into one `likely_cause`
+  (rules in [Verdicts](#verdicts-likely_cause)).
+
+→ `clusters/c{N}/`: `panel.tsv`, `deg_*.tsv`, `qc_drift_*.tsv`,
+`composition_*.tsv`, `umap_subcluster.png`.
+
+**4 · Canonical-core markers** *(stage `canonical`)* — one-vs-rest Wilcoxon
+markers for each cluster's clean core (its dominant fragment), gene-chunked
+(`wilcoxon_chunk_size`, default 3000) to bound memory; keep the top
+`top_n_canonical` genes. → `canonical_markers/`: `deg_long.tsv`, `markers_c*.tsv`,
+`heatmap_top_markers.png`.
+
+**5 · Minor-anatomy heatmaps** *(stage `anatomy`)* — per cluster, one heatmap
+placing every minor against the core's canonical markers, the QC columns, and the
+sample composition. → `clusters/c{N}/minor_anatomy.png`.
+
+**6 · Assembly** *(always — cheap)* — concatenate the per-cluster panels →
+`panel.tsv` (the headline table) and the QC drift → `qc_drift_all.tsv`; redraw
+`global_umap_compare.png`; dump every resolved parameter → `params.json`. If
+`labeled_h5ad_path` is given, the labelled AnnData is written via an atomic
+temp-file swap.
+
+**7 · Report** — `build_report(result["root"])` inlines every table and PNG into a
+single self-contained `report.html`.
 
 ## Verdicts (`likely_cause`)
 
