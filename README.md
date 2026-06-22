@@ -154,8 +154,3 @@ its top genes, top drift, and verdict. `report.html` is what you actually open.
 | `standissect.cluster`  | analysis primitives — UMAP-Leiden partition, per-cluster dissection, vectorised Mann-Whitney DEG, canonical-core markers, minor-anatomy heatmaps |
 | `standissect.pipeline` | `run_dissect_pipeline` — staged orchestrator, unified output tree, file-existence idempotency |
 | `standissect.report`   | `build_report` — single-file HTML report |
-
-## Design notes
-
-`docs/2026-05-13-dissect-cluster-design.md`,
-`docs/2026-05-15-dissect-pipeline-design.md`.
