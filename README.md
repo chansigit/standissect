@@ -19,7 +19,7 @@ from scratch; it cleans up and explains a clustering you already have.
 [Inputs](#inputs) ·
 [How it works](#how-it-works) ·
 [Pipeline](#pipeline--end-to-end) ·
-[Verdicts](#verdicts-likely_cause) ·
+[Diagnoses](#diagnoses-likely_cause) ·
 [Re-running](#re-running) ·
 [Output](#output-tree) ·
 [Modules](#modules)
@@ -74,8 +74,8 @@ QC/sample columns are optional but are what unlock the per-minor diagnosis.
 | sample col (anatomy heatmap) | `adata.obs[sample_col]` | optional | `sample_col="orig.ident"` |
 
 The expression for DEG comes from `adata.X` (or a layer via `deg_layer=`), not
-from an `obs` column. Which column *names* make the verdict specific rather than
-generic is spelled out under [Verdicts](#verdicts-likely_cause).
+from an `obs` column. Which column *names* make the diagnosis specific rather than
+generic is spelled out under [Diagnoses](#diagnoses-likely_cause).
 
 ## How it works
 
@@ -103,7 +103,7 @@ The full run is formulated step by step in [Pipeline — end to end](#pipeline--
 ```
 AnnData (X_umap + clustering)
   └─▶ 1. re-partition  ─▶ 2. crosstab + c{cluster}_{rank} naming
-        └─▶ 3. dissect minors  (DEG · composition · QC · verdict)
+        └─▶ 3. dissect minors  (DEG · composition · QC · diagnosis)
               └─▶ 4. canonical-core markers ─▶ 5. anatomy heatmaps
                     └─▶ 6. assemble panel / params ─▶ 7. report.html
 ```
@@ -139,9 +139,9 @@ off-main fragments holding ≥ `min_subcluster_size` (default 50) cells:
   BH-FDR), reported as a log2 odds ratio.
 - **QC drift** — for every `qc_cols` column, a Mann-Whitney of minor vs main
   (BH-FDR), recording the mean shift `Δ` and its relative size.
-- **Verdict** — fold the strongest sample-enrichment and QC-drift signals
+- **Diagnosis** — fold the strongest sample-enrichment and QC-drift signals
   together with the DEG count into one `likely_cause`
-  (rules in [Verdicts](#verdicts-likely_cause)).
+  (rules in [Diagnoses](#diagnoses-likely_cause)).
 
 → `clusters/c{N}/`: `panel.tsv`, `deg_*.tsv`, `qc_drift_*.tsv`,
 `composition_*.tsv`, `umap_subcluster.png`.
@@ -165,13 +165,13 @@ temp-file swap.
 **7 · Report** — `build_report(result["root"])` inlines every table and PNG into a
 single self-contained `report.html`.
 
-## Verdicts (`likely_cause`)
+## Diagnoses (`likely_cause`)
 
-Every minor gets exactly one verdict. Rules are checked top-to-bottom and the
+Every minor gets exactly one diagnosis. Rules are checked top-to-bottom and the
 first match wins; the QC rows are evaluated against the single most-strongly-
 drifted *significant* QC column (all drift tests use BH-FDR `padj < 0.05`).
 
-| verdict | what it means | fires when |
+| diagnosis | what it means | fires when |
 |---|---|---|
 | `sample-driven` | mostly one sample/donor — a batch or donor artifact, not a cell state | a `cat_cols` column named `orig.ident` is enriched (`log2_OR ≥ 2`) |
 | `doublet-driven` | enriched for doublets | `hybrid_score` drifts up (`relative_delta > 0.5`) |
@@ -181,7 +181,7 @@ drifted *significant* QC column (all drift tests use BH-FDR `padj < 0.05`).
 | `unclear` | not enough signal to call | otherwise |
 
 **The column names in the last column are literal.** The composition/QC
-*machinery* works on any column you pass, but these four verdict branches only
+*machinery* works on any column you pass, but these four diagnosis branches only
 fire for columns named exactly `orig.ident`, `hybrid_score`, `percent.mt`, and
 `nFeature_RNA`. Rename your `obs` columns to match (or pass them under these
 names); otherwise even a clear artifact only ever reaches `biology-candidate` or
@@ -215,7 +215,7 @@ h5ad on disk.
 ```
 
 `panel.tsv` is the headline table — one row per minor across all clusters, with
-its top genes, top drift, and verdict. `report.html` is what you actually open.
+its top genes, top drift, and diagnosis. `report.html` is what you actually open.
 
 ## Modules
 
