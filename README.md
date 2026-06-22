@@ -13,6 +13,17 @@ low-quality tail apart from a genuine rare subpopulation.
 It runs *downstream* of your scanpy pipeline — it neither embeds nor clusters
 from scratch; it cleans up and explains a clustering you already have.
 
+**Contents** ·
+[Install](#install) ·
+[Quickstart](#quickstart) ·
+[Inputs](#inputs) ·
+[How it works](#how-it-works) ·
+[Pipeline](#pipeline--end-to-end) ·
+[Verdicts](#verdicts-likely_cause) ·
+[Re-running](#re-running) ·
+[Output](#output-tree) ·
+[Modules](#modules)
+
 ## Install
 
 This is a flat package with no build config — cloning gives you a `standissect/`
@@ -49,6 +60,23 @@ build_report(result["root"])                # -> results/dissect/leiden/report.h
 Open `results/dissect/leiden/report.html` — a single self-contained file (images
 embedded) with a global overview and a per-cluster breakdown.
 
+## Inputs
+
+`standissect` reads the embedding and clustering straight from `adata`; the
+QC/sample columns are optional but are what unlock the per-minor diagnosis.
+
+| what | where | required? | how to specify |
+|---|---|---|---|
+| 2-D embedding | `adata.obsm[umap_key]` | **yes** — `KeyError` if absent | `umap_key="X_umap"` (default) |
+| existing clustering | `adata.obs[cluster_col]` | **yes** — `KeyError` if absent | `cluster_col="leiden"` |
+| categorical cols (composition drift) | `adata.obs[...]` | optional — missing cols silently skipped | `cat_cols=("orig.ident", "batch")` |
+| continuous QC cols (QC drift) | `adata.obs[...]` | optional — missing cols silently skipped | `qc_cols=("percent.mt", "nCount_RNA", "nFeature_RNA", "hybrid_score")` |
+| sample col (anatomy heatmap) | `adata.obs[sample_col]` | optional | `sample_col="orig.ident"` |
+
+The expression for DEG comes from `adata.X` (or a layer via `deg_layer=`), not
+from an `obs` column. Which column *names* make the verdict specific rather than
+generic is spelled out under [Verdicts](#verdicts-likely_cause).
+
 ## How it works
 
 For each original cluster, the cells are re-partitioned on their UMAP coords.
@@ -57,10 +85,10 @@ other fragment above `min_subcluster_size` cells is a **minor** to diagnose:
 
 ```
 original cluster "3"        UMAP-Leiden re-partition        standissect label
-────────────────────        ────────────────────────        ──────────────────────
-                        ┌──  u5  (8,021 cells, largest) ──▶  c3_0   main core   (kept clean)
-  cluster 3   ──────────┼──  u9  (  412 cells)          ──▶  c3_1   minor  → diagnose
-  (8,800 cells)         └──  u2  (  367 cells)          ──▶  c3_2   minor  → diagnose
+────────────────────        ────────────────────────        ──────────────────
+                        ┌──  u5  (8,021 cells, largest) ──▶  c3_0   main core  (kept clean)
+  cluster 3   ──────────┼──  u9  (  412 cells)          ──▶  c3_1   minor → diagnose
+  (8,800 cells)         └──  u2  (  367 cells)          ──▶  c3_2   minor → diagnose
 ```
 
 Fragments are named `c{cluster}_{rank}`, rank 0 being the main core. Each cell
@@ -158,23 +186,6 @@ fire for columns named exactly `orig.ident`, `hybrid_score`, `percent.mt`, and
 `nFeature_RNA`. Rename your `obs` columns to match (or pass them under these
 names); otherwise even a clear artifact only ever reaches `biology-candidate` or
 `unclear`.
-
-## Inputs
-
-`standissect` reads the embedding and clustering straight from `adata`; the
-QC/sample columns are optional but are what unlock the per-minor diagnosis.
-
-| what | where | required? | how to specify |
-|---|---|---|---|
-| 2-D embedding | `adata.obsm[umap_key]` | **yes** — `KeyError` if absent | `umap_key="X_umap"` (default) |
-| existing clustering | `adata.obs[cluster_col]` | **yes** — `KeyError` if absent | `cluster_col="leiden"` |
-| categorical cols (composition drift) | `adata.obs[...]` | optional — missing cols silently skipped | `cat_cols=("orig.ident", "batch")` |
-| continuous QC cols (QC drift) | `adata.obs[...]` | optional — missing cols silently skipped | `qc_cols=("percent.mt", "nCount_RNA", "nFeature_RNA", "hybrid_score")` |
-| sample col (anatomy heatmap) | `adata.obs[sample_col]` | optional | `sample_col="orig.ident"` |
-
-The expression for DEG comes from `adata.X` (or a layer via `deg_layer=`), not
-from an `obs` column. For which column *names* make the verdict specific rather
-than generic, see [Verdicts](#verdicts-likely_cause) above.
 
 ## Re-running
 
