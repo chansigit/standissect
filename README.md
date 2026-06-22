@@ -93,8 +93,9 @@ original cluster "3"        UMAP-Leiden re-partition        standissect label
 
 Fragments are named `c{cluster}_{rank}`, rank 0 being the main core. Each cell
 ends up with two new labels: `obs['umap_cluster']` (the global re-partition) and
-`obs['original_cluster_split']` (the `c{cluster}_{rank}` name). The full
-cluster × re-partition contingency table is written to `crosstab.tsv`.
+`obs['original_cluster_split']` (the `c{cluster}_{rank}` name). A table of how
+many cells each original cluster shares with each UMAP fragment is written to
+`cluster_overlap.tsv`.
 
 The full run is formulated step by step in [Pipeline — end to end](#pipeline--end-to-end).
 
@@ -102,7 +103,7 @@ The full run is formulated step by step in [Pipeline — end to end](#pipeline--
 
 ```
 AnnData (X_umap + clustering)
-  └─▶ 1. re-partition  ─▶ 2. crosstab + c{cluster}_{rank} naming
+  └─▶ 1. re-partition  ─▶ 2. overlap table + c{cluster}_{rank} naming
         └─▶ 3. dissect minors  (DEG · composition · QC · diagnosis)
               └─▶ 4. canonical-core markers ─▶ 5. anatomy heatmaps
                     └─▶ 6. assemble panel / params ─▶ 7. report.html
@@ -122,8 +123,9 @@ run aborts with `KeyError`. Nothing is embedded or clustered from scratch.
 partition lands within `target_tol` (default 2) clusters of `target_k`, capped at
 12 iterations. → per-cell `obs['umap_cluster']` (`u0, u1, …`).
 
-**2 · Crosstab + Cartesian naming** *(always — cheap)* — cross-tabulate
-`cluster_col × umap_cluster` → `crosstab.tsv`. Within each original cluster, rank
+**2 · Overlap table + Cartesian naming** *(always — cheap)* — count how many
+cells each `cluster_col` value shares with each `umap_cluster` fragment →
+`cluster_overlap.tsv`. Within each original cluster, rank
 its UMAP fragments by size and name them `c{cluster}_{rank}` (rank 0 = largest =
 **main core**). → `obs['original_cluster_split']`, `cell_labels.tsv`.
 
@@ -206,7 +208,7 @@ h5ad on disk.
 
 ```
 <output_dir>/<cluster_col>/
-├── crosstab.tsv  panel.tsv  cell_labels.tsv  qc_drift_all.tsv  params.json
+├── cluster_overlap.tsv  panel.tsv  cell_labels.tsv  qc_drift_all.tsv  params.json
 ├── global_umap_compare.png
 ├── canonical_markers/    deg_long.tsv  markers_*.tsv  heatmap_top_markers.png
 ├── clusters/c0/ ... c{N}/   panel, DEG/QC/composition TSVs,

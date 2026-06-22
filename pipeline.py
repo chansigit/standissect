@@ -37,7 +37,7 @@ class _Layout:
         self.canonical = self.root / 'canonical_markers'
 
     @property
-    def crosstab(self):      return self.root / 'crosstab.tsv'
+    def crosstab(self):      return self.root / 'cluster_overlap.tsv'
     @property
     def panel(self):         return self.root / 'panel.tsv'
     @property
