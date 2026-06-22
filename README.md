@@ -15,9 +15,17 @@ from scratch; it cleans up and explains a clustering you already have.
 
 ## Install
 
+This is a flat package with no build config — cloning gives you a `standissect/`
+directory you import directly. Put its parent on the path:
+
 ```
-pip install -e .
+git clone https://github.com/chansigit/standissect.git
+export PYTHONPATH="$PWD:$PYTHONPATH"     # $PWD is the parent of standissect/
+python -c "import standissect"           # smoke test
 ```
+
+Requires `numpy`, `pandas`, `scipy`, `statsmodels`, `scanpy`/`anndata`,
+`scikit-learn`, `python-igraph`, `leidenalg`, `matplotlib`, `seaborn`.
 
 ## Quickstart
 
@@ -146,12 +154,6 @@ its top genes, top drift, and verdict. `report.html` is what you actually open.
 | `standissect.cluster`  | analysis primitives — UMAP-Leiden partition, per-cluster dissection, vectorised Mann-Whitney DEG, canonical-core markers, minor-anatomy heatmaps |
 | `standissect.pipeline` | `run_dissect_pipeline` — staged orchestrator, unified output tree, file-existence idempotency |
 | `standissect.report`   | `build_report` — single-file HTML report |
-
-## Tests
-
-```
-pytest tests/test_cluster.py tests/test_pipeline.py tests/test_report.py
-```
 
 ## Design notes
 
