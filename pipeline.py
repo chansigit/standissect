@@ -1,7 +1,7 @@
 """standissect.pipeline — unified orchestrator for the cluster cleanup-diagnosis.
 
 ``run_dissect_pipeline`` runs the three stages (partition + dissect,
-canonical-core markers, minor-anatomy heatmaps) into one output tree, with
+canonical-core markers, minor-profile heatmaps) into one output tree, with
 file-existence idempotency. The analysis primitives live in
 ``standissect.cluster``.
 
@@ -18,9 +18,9 @@ import numpy as np
 import pandas as pd
 
 from .cluster import (umap_leiden_partition, dissect_one_cluster,
-                      canonical_marker_deg, plot_minor_anatomy)
+                      canonical_marker_deg, plot_minor_profile)
 
-_STAGES = ('partition', 'dissect', 'canonical', 'anatomy')
+_STAGES = ('partition', 'dissect', 'canonical', 'profile')
 
 _PANEL_COLS = ['parent_cluster', 'subcluster', 'minor_umap_label',
                'main_umap_label', 'n_cells', 'frac_of_parent',
@@ -53,7 +53,7 @@ class _Layout:
 
     def cluster_dir(self, parent):    return self.clusters / f"c{parent}"
     def cluster_panel(self, parent):  return self.cluster_dir(parent) / 'panel.tsv'
-    def anatomy_png(self, parent):    return self.cluster_dir(parent) / 'minor_anatomy.png'
+    def profile_png(self, parent):    return self.cluster_dir(parent) / 'minor_profile.png'
 
 
 def _normalize_force(force):
@@ -255,7 +255,7 @@ def run_dissect_pipeline(
 
     Idempotent: a unit is skipped when its primary output file already exists and
     the unit is not named in ``force`` (a subset of {'partition','dissect',
-    'canonical','anatomy'}, or 'all'). Existing ``adata.obs['umap_cluster']`` and
+    'canonical','profile'}, or 'all'). Existing ``adata.obs['umap_cluster']`` and
     ``adata.obs['original_cluster_split']`` are overwritten in memory. Recomputed
     labels always go to ``cell_labels.tsv``; pass ``labeled_h5ad_path`` to also
     persist those overwritten obs columns to an h5ad file.
@@ -394,19 +394,19 @@ def run_dissect_pipeline(
         )
         canonical_deg = canon_res['deg']
 
-    # ---- STAGE 4: per-cluster minor-anatomy heatmaps -------------------
-    anat_force = part_force or ('dissect' in force) or ('anatomy' in force)
-    if anat_force:
+    # ---- STAGE 4: per-cluster minor-profile heatmaps -------------------
+    profile_force = part_force or ('dissect' in force) or ('profile' in force)
+    if profile_force:
         parents_todo = [str(p) for p in crosstab.index]
     else:
         parents_todo = [str(p) for p in crosstab.index
-                        if not lay.anatomy_png(p).exists()]
-        skipped += [f'anatomy:c{p}' for p in crosstab.index
+                        if not lay.profile_png(p).exists()]
+        skipped += [f'profile:c{p}' for p in crosstab.index
                     if str(p) not in parents_todo]
     if parents_todo:
-        print(f"[pipeline] drawing minor-anatomy heatmaps for "
+        print(f"[pipeline] drawing minor-profile heatmaps for "
               f"{len(parents_todo)} clusters ...", flush=True)
-        plot_minor_anatomy(
+        plot_minor_profile(
             adata, subcluster_col='original_cluster_split',
             canonical_deg_df=canonical_deg, clusters_dir=str(lay.clusters),
             qc_cols=qc_cols, sample_col=sample_col,

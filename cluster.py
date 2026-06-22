@@ -1,7 +1,7 @@
 """standissect.cluster — analysis primitives for the cluster cleanup-diagnosis.
 
 UMAP-Leiden partition, per-cluster dissection, DEG, canonical-core markers,
-minor-anatomy heatmaps, vectorised Wilcoxon. Orchestration + the unified output
+minor-profile heatmaps, vectorised Wilcoxon. Orchestration + the unified output
 tree + idempotency live in ``standissect.pipeline``.
 """
 from __future__ import annotations
@@ -557,7 +557,7 @@ def canonical_marker_deg(
 
 
 # =============================================================================
-#  Minor-anatomy heatmap (per-cluster)
+#  Minor-profile heatmap (per-cluster)
 # =============================================================================
 
 def _select_gene_blocks(
@@ -704,7 +704,7 @@ def _cluster_rows(mat: pd.DataFrame, method: str = 'average', metric: str = 'euc
     return order, Z
 
 
-def plot_minor_anatomy(
+def plot_minor_profile(
     adata,
     *,
     subcluster_col: str,
@@ -717,7 +717,7 @@ def plot_minor_anatomy(
     min_subcluster_size: int = 50,
     parents=None,
 ) -> dict:
-    """Per-parent minor-anatomy heatmap.
+    """Per-parent minor-profile heatmap.
 
     One merged gene block (canonical-core + minor-specific markers, optimal leaf
     ordering). The canonical cores ``c?_0`` and this parent's minors ``c?_i`` are
@@ -727,7 +727,7 @@ def plot_minor_anatomy(
     column names are bold.
 
     Reads per-minor DEG from ``clusters_dir/c{parent}/`` and writes each parent's
-    heatmap to ``clusters_dir/c{parent}/minor_anatomy.png``.
+    heatmap to ``clusters_dir/c{parent}/minor_profile.png``.
     """
     import matplotlib
     matplotlib.use('Agg')
@@ -917,9 +917,9 @@ def plot_minor_anatomy(
             fig.colorbar(im_s, cax=fig.add_subplot(gs[3, 0]),
                          label='sample frac', ticklocation='left')
 
-        fig.suptitle(f"parent c{parent} — minor anatomy  "
+        fig.suptitle(f"parent c{parent} — minor profile  "
                      f"({n_core} cores | {n_minor} minors)", fontsize=11)
-        fig_path = pdir / 'minor_anatomy.png'
+        fig_path = pdir / 'minor_profile.png'
         fig.savefig(fig_path, bbox_inches='tight'); plt.close(fig)
         figures[parent] = str(fig_path)
     return {'figures': figures}

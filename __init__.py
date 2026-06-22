@@ -1,7 +1,7 @@
 """standissect — cluster cleanup-diagnosis for single-cell data.
 
 Dissects a clustering on its UMAP-Leiden fragments: per-cluster DEG / QC /
-composition drift, canonical-core markers, minor-anatomy heatmaps, and a
+composition drift, canonical-core markers, minor-profile heatmaps, and a
 self-contained HTML report — orchestrated with file-existence idempotency.
 
     from standissect import run_dissect_pipeline, build_report
@@ -17,7 +17,7 @@ from .cluster import (
     umap_leiden_partition,
     dissect_one_cluster,
     canonical_marker_deg,
-    plot_minor_anatomy,
+    plot_minor_profile,
     wilcoxon_one_vs_rest,
     wilcoxon_vs_reference,
 )
@@ -31,7 +31,7 @@ __all__ = [
     "umap_leiden_partition",
     "dissect_one_cluster",
     "canonical_marker_deg",
-    "plot_minor_anatomy",
+    "plot_minor_profile",
     "wilcoxon_one_vs_rest",
     "wilcoxon_vs_reference",
 ]

@@ -105,13 +105,13 @@ The full run is formulated step by step in [Pipeline — end to end](#pipeline--
 AnnData (X_umap + clustering)
   └─▶ 1. re-partition  ─▶ 2. overlap table + c{cluster}_{rank} naming
         └─▶ 3. dissect minors  (DEG · composition · QC · diagnosis)
-              └─▶ 4. canonical-core markers ─▶ 5. anatomy heatmaps
+              └─▶ 4. canonical-core markers ─▶ 5. profile heatmaps
                     └─▶ 6. assemble panel / params ─▶ 7. report.html
 ```
 
 Each numbered step writes its result to the [output tree](#output-tree) and is
 **skipped when that output already exists** (see [Re-running](#re-running)); the
-stage tags `partition` / `dissect` / `canonical` / `anatomy` are the names you
+stage tags `partition` / `dissect` / `canonical` / `profile` are the names you
 pass to `force=`.
 
 **0 · Preconditions.** `obsm[umap_key]` and `obs[cluster_col]` must exist, or the
@@ -123,7 +123,7 @@ run aborts with `KeyError`. Nothing is embedded or clustered from scratch.
 partition lands within `target_tol` (default 2) clusters of `target_k`, capped at
 12 iterations. → per-cell `obs['umap_cluster']` (`u0, u1, …`).
 
-**2 · Overlap table + Cartesian naming** *(always — cheap)* — count how many
+**2 · Overlap table + ranked naming** *(always — cheap)* — count how many
 cells each `cluster_col` value shares with each `umap_cluster` fragment →
 `cluster_overlap.tsv`. Within each original cluster, rank
 its UMAP fragments by size and name them `c{cluster}_{rank}` (rank 0 = largest =
@@ -145,18 +145,19 @@ off-main fragments holding ≥ `min_subcluster_size` (default 50) cells:
   together with the DEG count into one `likely_cause`
   (rules in [Diagnoses](#diagnoses-likely_cause)).
 
-→ `clusters/c{N}/`: `panel.tsv`, `deg_*.tsv`, `qc_drift_*.tsv`,
-`composition_*.tsv`, `umap_subcluster.png`.
+→ `clusters/c{N}/`: `panel.tsv`, `subcluster_labels.tsv`, `deg_*.tsv`,
+`qc_drift_*.tsv`, `composition_*.tsv`, `umap_subcluster.png`.
 
 **4 · Canonical-core markers** *(stage `canonical`)* — one-vs-rest Wilcoxon
 markers for each cluster's clean core (its dominant fragment), gene-chunked
-(`wilcoxon_chunk_size`, default 3000) to bound memory; keep the top
+(3000 genes at a time) to bound memory; keep the top
 `top_n_canonical` genes. → `canonical_markers/`: `deg_long.tsv`, `markers_c*.tsv`,
 `heatmap_top_markers.png`.
 
-**5 · Minor-anatomy heatmaps** *(stage `anatomy`)* — per cluster, one heatmap
+**5 · Minor-profile heatmaps** *(stage `profile`)* — per cluster, one heatmap
 placing every minor against the core's canonical markers, the QC columns, and the
-sample composition. → `clusters/c{N}/minor_anatomy.png`.
+sample composition. → `clusters/c{N}/minor_profile.png` (with `heatmap_data.tsv` /
+`qc_tracks.tsv` / `sample_composition.tsv` / `genes_*.txt` sidecars).
 
 **6 · Assembly** *(always — cheap)* — concatenate the per-cluster panels →
 `panel.tsv` (the headline table) and the QC drift → `qc_drift_all.tsv`; redraw
@@ -199,7 +200,7 @@ recompute, name the stages to redo:
 run_dissect_pipeline(adata, ..., force=("partition", "dissect"))  # or force="all"
 ```
 
-Valid stage names are `partition`, `dissect`, `canonical`, `anatomy`. Each run
+Valid stage names are `partition`, `dissect`, `canonical`, `profile`. Each run
 overwrites `adata.obs["umap_cluster"]` and `adata.obs["original_cluster_split"]`
 **in memory**; pass `labeled_h5ad_path=` to also persist those labels to an
 h5ad on disk.
@@ -211,8 +212,11 @@ h5ad on disk.
 ├── cluster_overlap.tsv  panel.tsv  cell_labels.tsv  qc_drift_all.tsv  params.json
 ├── global_umap_compare.png
 ├── canonical_markers/    deg_long.tsv  markers_*.tsv  heatmap_top_markers.png
-├── clusters/c0/ ... c{N}/   panel, DEG/QC/composition TSVs,
-│                            umap_subcluster.png, minor_anatomy.png
+├── clusters/c0/ ... c{N}/   panel.tsv  subcluster_labels.tsv
+│                            deg_*.tsv  qc_drift_*.tsv  composition_*.tsv
+│                            heatmap_data.tsv  qc_tracks.tsv  sample_composition.tsv
+│                            genes_canonical.txt  genes_minor.txt
+│                            umap_subcluster.png  minor_profile.png
 └── report.html              self-contained HTML report (images embedded)
 ```
 
@@ -223,6 +227,6 @@ its top genes, top drift, and diagnosis. `report.html` is what you actually open
 
 | module | role |
 |---|---|
-| `standissect.cluster`  | analysis primitives — UMAP-Leiden partition, per-cluster dissection, vectorised Mann-Whitney DEG, canonical-core markers, minor-anatomy heatmaps |
+| `standissect.cluster`  | analysis primitives — UMAP-Leiden partition, per-cluster dissection, vectorised Mann-Whitney DEG, canonical-core markers, minor-profile heatmaps |
 | `standissect.pipeline` | `run_dissect_pipeline` — staged orchestrator, unified output tree, file-existence idempotency |
 | `standissect.report`   | `build_report` — single-file HTML report |

@@ -112,8 +112,8 @@ def build_report(root, output_html=None):
         cdir = clusters_dir / f'c{cid}'
         h.append(f'<h2 id="c{cid}">cluster {cid}</h2>')
         h.append('<div class="imgrow">')
-        h.append('<div><div class="cap">minor-anatomy heatmap</div>'
-                 + _img(cdir / 'minor_anatomy.png') + '</div>')
+        h.append('<div><div class="cap">minor-profile heatmap</div>'
+                 + _img(cdir / 'minor_profile.png') + '</div>')
         h.append('<div><div class="cap">UMAP zoom</div>'
                  + _img(cdir / 'umap_subcluster.png') + '</div>')
         h.append('</div>')
