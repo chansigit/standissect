@@ -12,6 +12,26 @@ import numpy as np
 import pandas as pd
 
 
+def _split_ranked_label(label: str) -> tuple[str, int | None]:
+    """Parse c{parent}_{rank} while allowing underscores in parent names."""
+    body = str(label)
+    if body.startswith('c'):
+        body = body[1:]
+    parent, sep, rank = body.rpartition('_')
+    if sep and rank.isdigit():
+        return parent, int(rank)
+    return body, None
+
+
+def _canonical_group_sort_key(group: str) -> tuple[int, int | str, int, str]:
+    """Sort c{parent}_rank labels with numeric parents first, then string parents."""
+    parent, rank = _split_ranked_label(group)
+    try:
+        return (0, int(parent), -1 if rank is None else rank, str(group))
+    except ValueError:
+        return (1, parent, -1 if rank is None else rank, str(group))
+
+
 def _composition_drift(
     obs: pd.DataFrame,
     *,
@@ -493,7 +513,7 @@ def canonical_marker_deg(
                    .sort_values(['group', 'scores'], ascending=[True, False])
                    .groupby('group').head(5))
         markers = top_per['gene'].drop_duplicates().tolist()
-        groups_sorted = sorted(groups, key=lambda x: int(x.lstrip('c').split('_')[0]))
+        groups_sorted = sorted(groups, key=_canonical_group_sort_key)
         mat = np.zeros((len(markers), len(groups_sorted)))
         for j, g in enumerate(groups_sorted):
             cells = (sub.obs['canonical_group'] == g).values
@@ -557,12 +577,7 @@ def _select_gene_blocks(
     """
     var_set = set(adata.var_names)
 
-    def _group_sort_key(g):
-        try:
-            return int(g.lstrip('c').split('_')[0])
-        except Exception:
-            return 1e9
-    canon_order = sorted(canonical_deg_df['group'].unique(), key=_group_sort_key)
+    canon_order = sorted(canonical_deg_df['group'].unique(), key=_canonical_group_sort_key)
     canon = []
     for g in canon_order:
         sub_df = (canonical_deg_df[(canonical_deg_df['group'] == g) &
@@ -725,7 +740,7 @@ def plot_minor_anatomy(
 
     sub_arr = adata.obs[subcluster_col].astype(str)
     canon_groups_all = sorted(canonical_deg_df['group'].unique(),
-                              key=lambda g: int(g.lstrip('c').split('_')[0]))
+                              key=_canonical_group_sort_key)
     canon_groups = [g for g in canon_groups_all if (sub_arr == g).any()]
     missing_canon = set(canon_groups_all) - set(canon_groups)
     if missing_canon:
@@ -737,14 +752,14 @@ def plot_minor_anatomy(
     # Every parent with a c{N}_0 label; minors = ALL non-_0 fragments (any size).
     minor_by_parent: dict = {}
     for g in canon_groups:
-        minor_by_parent.setdefault(g.lstrip('c').split('_')[0], [])
+        parent, _ = _split_ranked_label(g)
+        minor_by_parent.setdefault(parent, [])
     for label in sizes.index:
         if label in canon_groups or '_' not in label:
             continue
-        suffix = label.split('_')[-1]
-        if not suffix.isdigit() or suffix == '0':
+        parent_str, rank = _split_ranked_label(label)
+        if rank is None or rank == 0:
             continue
-        parent_str = label.split('_')[0].lstrip('c')
         if parent_str in minor_by_parent:
             minor_by_parent[parent_str].append(label)
     if parents is not None:

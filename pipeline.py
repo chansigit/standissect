@@ -241,6 +241,7 @@ def run_dissect_pipeline(
     sample_col='orig.ident',
     resolution=0.5,
     target_k=None,
+    target_tol=2,
     n_neighbors=30,
     min_subcluster_size=50,
     top_n_deg=50,
@@ -298,7 +299,7 @@ def run_dissect_pipeline(
               flush=True)
         labels, partition_info = umap_leiden_partition(
             adata.obsm[umap_key], target_k=tk, resolution=resolution,
-            n_neighbors=n_neighbors, random_state=random_state)
+            n_neighbors=n_neighbors, tol=target_tol, random_state=random_state)
         labels.index = adata.obs_names
         adata.obs[umap_label_col] = pd.Categorical([f"u{x}" for x in labels.values])
         partition_info['reused'] = False
@@ -418,7 +419,8 @@ def run_dissect_pipeline(
         'cluster_col': cluster_col, 'umap_key': umap_key,
         'cat_cols': list(cat_cols), 'qc_cols': list(qc_cols),
         'sample_col': sample_col, 'resolution': resolution,
-        'target_k': target_k, 'n_neighbors': n_neighbors,
+        'target_k': target_k, 'target_tol': target_tol,
+        'n_neighbors': n_neighbors,
         'min_subcluster_size': min_subcluster_size, 'top_n_deg': top_n_deg,
         'top_n_canonical': top_n_canonical, 'deg_layer': deg_layer,
         'random_state': random_state, 'n_jobs': n_jobs, 'force': sorted(force),
