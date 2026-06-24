@@ -11,8 +11,6 @@ import json
 import os
 from pathlib import Path
 import re
-import urllib.error
-import urllib.request
 
 try:                                    # package use (standissect.diagnosis)
     from .llm_client import OpenAICompatClient, call_structured, extract_json, LLMUnavailable
