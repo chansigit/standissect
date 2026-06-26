@@ -531,6 +531,36 @@ def parse_llm_result(raw, *, rule_baseline, mode, model) -> DiagnosisResult:
     return _diagnosis_from_dict(data, rule_baseline=rule_baseline, mode=mode, model=model)
 
 
+def make_chat_client(
+    *,
+    mode: str = 'llm',
+    llm_client=None,
+    ark_api_key: str | None = None,
+    ark_api_key_env: str = 'ARK_API_KEY',
+    ark_model: str = DEFAULT_ARK_MODEL,
+    ark_endpoint: str = DEFAULT_ARK_ENDPOINT,
+    timeout: int = 60,
+):
+    """Build a chat client for LLM modes, or return ``None``.
+
+    Returns ``None`` when ``mode == 'rule'`` or when no client/key is available,
+    so callers can degrade gracefully instead of crashing. A provided
+    ``llm_client`` is returned as-is when it has ``.complete``, else wrapped in a
+    ``CallableChatClient``. Never raises on a missing key.
+    """
+    if str(mode) == 'rule':
+        return None
+    if llm_client is not None:
+        if hasattr(llm_client, 'complete'):
+            return llm_client
+        return CallableChatClient(llm_client, model=ark_model)
+    api_key = ark_api_key if ark_api_key is not None else os.environ.get(ark_api_key_env)
+    if not api_key:
+        return None
+    return ArkChatClient(
+        api_key=api_key, model=ark_model, endpoint=ark_endpoint, timeout=timeout)
+
+
 def make_diagnosis_engine(
     *,
     mode: str = 'rule',
@@ -547,30 +577,25 @@ def make_diagnosis_engine(
 
     ``llm_client`` may be an object with ``complete(system, user)`` or a callable
     with that same signature. Without ``llm_client``, LLM modes create an Ark
-    client from ``ARK_API_KEY``.
+    client from ``ARK_API_KEY``. Raises ``ValueError`` for an LLM mode with no
+    client and no key (use ``make_chat_client`` directly for graceful degrade).
     """
     mode = str(mode)
     if mode not in {'rule', 'llm', 'hybrid'}:
         raise ValueError("diagnosis_mode must be 'rule', 'llm', or 'hybrid'")
     if mode == 'rule':
         return RuleDiagnosisEngine(diagnosis_roles)
-    if llm_client is None:
-        api_key = ark_api_key if ark_api_key is not None else os.environ.get(ark_api_key_env)
-        if not api_key:
-            raise ValueError(
-                f"diagnosis_mode={mode!r} requires diagnosis_llm_client, "
-                f"diagnosis_ark_api_key, or environment variable {ark_api_key_env!r}"
-            )
-        llm_client = ArkChatClient(
-            api_key=api_key,
-            model=ark_model,
-            endpoint=ark_endpoint,
-            timeout=timeout,
+    client = make_chat_client(
+        mode=mode, llm_client=llm_client, ark_api_key=ark_api_key,
+        ark_api_key_env=ark_api_key_env, ark_model=ark_model,
+        ark_endpoint=ark_endpoint, timeout=timeout)
+    if client is None:
+        raise ValueError(
+            f"diagnosis_mode={mode!r} requires diagnosis_llm_client, "
+            f"diagnosis_ark_api_key, or environment variable {ark_api_key_env!r}"
         )
-    elif not hasattr(llm_client, 'complete'):
-        llm_client = CallableChatClient(llm_client, model=ark_model)
     return LLMDiagnosisEngine(
-        llm_client, mode=mode, fallback_to_rule=fallback_to_rule,
+        client, mode=mode, fallback_to_rule=fallback_to_rule,
         diagnosis_roles=diagnosis_roles)
 
 
