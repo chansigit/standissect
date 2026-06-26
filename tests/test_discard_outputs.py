@@ -101,3 +101,18 @@ def test_proposed_cell_types_empty_header_only(tmp_path):
     _write_proposed_cell_types(lay, panel, core)
     out = pd.read_csv(lay.proposed_cell_types, sep='\t')
     assert len(out) == 0 and list(out.columns) == _PROPOSED_COLS
+
+
+def test_proposed_major_excludes_null_cell_type(tmp_path):
+    lay = _Layout(tmp_path, 'leiden')
+    lay.root.mkdir(parents=True)
+    panel = pd.DataFrame({'parent_cluster': ['0'], 'subcluster': ['c0_1'],
+                          'proposed_cell_type': [None]})
+    core = pd.DataFrame({'parent_cluster': ['m', 'n'],
+                         'core_subcluster': ['cm_0', 'cn_0'],
+                         'cell_type': ['cDC1', None],
+                         'confidence': [0.9, 0.5], 'rationale': ['markers', 'x'],
+                         'differs_from_original': [True, True]})
+    _write_proposed_cell_types(lay, panel, core)
+    out = pd.read_csv(lay.proposed_cell_types, sep='\t')
+    assert list(out['proposed_cell_type']) == ['cDC1']

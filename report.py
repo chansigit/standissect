@@ -67,11 +67,12 @@ def _discards_section(root):
     if not len(discard):
         h.append('<p class="muted">No clusters recommended for discard.</p>')
     else:
-        n_cells = int(pd.to_numeric(discard.get('n_cells'),
-                                    errors='coerce').fillna(0).sum())
+        n_cells = int(pd.to_numeric(
+            discard['n_cells'] if 'n_cells' in discard.columns else pd.Series([], dtype=float),
+            errors='coerce').fillna(0).sum())
         by_cause = (discard['likely_cause'].astype(str).value_counts().to_dict()
                     if 'likely_cause' in discard.columns else {})
-        cause_str = ', '.join(f'{k}: {v}' for k, v in by_cause.items())
+        cause_str = ', '.join(f'{_html.escape(str(k))}: {v}' for k, v in by_cause.items())
         h.append(f'<p><b>{len(discard)}</b> clusters recommended for discard, '
                  f'<b>{n_cells}</b> cells total. By cause — {cause_str}.</p>')
         cols = [c for c in ('subcluster', 'n_cells', 'likely_cause',

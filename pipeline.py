@@ -228,9 +228,14 @@ def _write_proposed_cell_types(lay, panel, core_names_df):
                 'confidence': r.get('diagnosis_confidence'),
                 'rationale': r.get('diagnosis_rationale'),
             })
-    if len(core_names_df) and 'differs_from_original' in core_names_df.columns:
-        d = core_names_df[core_names_df['differs_from_original'].apply(
-            lambda v: str(v).strip().lower() in ('true', '1'))]
+    if (len(core_names_df) and 'differs_from_original' in core_names_df.columns
+            and 'cell_type' in core_names_df.columns):
+        differs = core_names_df['differs_from_original'].apply(
+            lambda v: str(v).strip().lower() in ('true', '1'))
+        named = (core_names_df['cell_type'].notna()
+                 & (core_names_df['cell_type'].astype(str).str.strip() != '')
+                 & (core_names_df['cell_type'].astype(str).str.strip().str.lower() != 'nan'))
+        d = core_names_df[differs & named]
         for _, r in d.iterrows():
             rows.append({
                 'level': 'major',

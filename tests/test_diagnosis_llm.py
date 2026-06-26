@@ -164,3 +164,15 @@ def test_new_cause_dissociation_is_accepted_by_llm():
     r = parse_llm_result(payload, rule_baseline=None, mode="llm", model=None)
     assert r.likely_cause == "dissociation-effect"
     assert r.recommended_disposition == "DISCARD"
+
+
+def test_llm_relaxation_through_parse_layer_beats_post_init_default():
+    # doublet-driven baseline = DISCARD; LLM relaxes to UNCERTAIN (allowed).
+    # Without the _diagnosis_from_dict finalize wiring, __post_init__ would leave DISCARD.
+    payload = json.dumps({"likely_cause": "doublet-driven", "confidence": 0.9,
+                          "rationale": "actually fine",
+                          "recommended_disposition": "UNCERTAIN",
+                          "disposition_reason": "looks like real cells"})
+    r = parse_llm_result(payload, rule_baseline=None, mode="llm", model=None)
+    assert r.recommended_disposition == "UNCERTAIN"
+    assert r.disposition_overridden is True
