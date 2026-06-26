@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Derive a per-cluster `recommended_disposition` (DISCARD / KEEP / UNCERTAIN) from the existing minor-cause diagnosis and surface explicit, fully-automated junk-discard recommendations in `panel.tsv`, `cell_labels.tsv`, a new `discard_cells.tsv`, and a report section.
+**Goal:** Two complementary, fully-automated per-fragment recommendations: (1) a `recommended_disposition` (DISCARD/KEEP/UNCERTAIN) surfaced in `panel.tsv`, `cell_labels.tsv`, a new cell-precise `discard_cells.tsv`, and a report section; (2) **LLM-proposed cell types** — finer/different identities for minors (diagnosis) and major cores (naming) vs the original annotation — collected in a new `proposed_cell_types.tsv` + report section.
 
-**Architecture:** A deterministic `DISPOSITION_MAP` turns each `likely_cause` into a baseline disposition; an LLM may relax it toward KEEP (never escalate toward DISCARD); a confidence gate downgrades low-confidence DISCARDs to UNCERTAIN. Disposition logic lives in `diagnosis.py` (engine-held threshold, finalized inside `diagnose()`); `pipeline.py` writes the new columns/files; `report.py` renders the section; `cli.py` exposes the threshold.
+**Architecture:** A deterministic `DISPOSITION_MAP` turns each `likely_cause` into a baseline disposition; the LLM may relax it toward KEEP (never escalate toward DISCARD); a confidence gate downgrades low-confidence DISCARDs to UNCERTAIN. Disposition + minor `proposed_cell_type` live in `diagnosis.py` (threshold held by the engine, finalized inside `diagnose()`); the major relabel flag lives in `annotate.py` naming; `pipeline.py` writes the columns/files (`discard_cells.tsv` keyed by barcode + input-adata row index; `proposed_cell_types.tsv`); `report.py` renders both sections; `cli.py` exposes the threshold.
 
-**Tech Stack:** Python stdlib + numpy + pandas (no new deps). Diagnosis LLM via the existing vendored `llm_client.py` (unchanged). Tests: pytest.
+**Tech Stack:** Python stdlib + numpy + pandas (no new deps). LLM via the existing vendored `llm_client.py` (unchanged). Tests: pytest.
 
 ## Global Constraints
 
@@ -14,31 +14,34 @@
 - Branch `feat/recommend-discard` (already created off `main`). Do NOT merge without user OK. Per-task commits.
 - Tests run LOCALLY on this compute node. NO `srun`/`sbatch`/Slurm.
 - stdlib-only; NO new pip dependencies; do NOT modify the vendored `llm_client.py`.
-- Disposition values are UPPERCASE `DISCARD` / `KEEP` / `UNCERTAIN`; `likely_cause` stays lowercase kebab-case.
-- 11-cause taxonomy is locked. The 5 new causes (`dissociation-effect`, `cell-cycle`, `ambient-contamination`, `sex-driven`, `interferon-response`) are **LLM-only** — the rule cascade in `RuleDiagnosisEngine.diagnose` is NOT extended.
-- **Conservative-only invariant:** automated adjustments (LLM override + confidence gate) may only move a disposition toward KEEP (`DISCARD`→`UNCERTAIN`→`KEEP`), never toward `DISCARD`. A `KEEP`/`UNCERTAIN` baseline can never be auto-escalated to `DISCARD`.
+- Disposition values are UPPERCASE `DISCARD`/`KEEP`/`UNCERTAIN`; `likely_cause` stays lowercase kebab-case.
+- 11-cause taxonomy locked; the 5 new causes (`dissociation-effect`, `cell-cycle`, `ambient-contamination`, `sex-driven`, `interferon-response`) are **LLM-only** — `RuleDiagnosisEngine.diagnose` is NOT extended.
+- **Conservative-only invariant:** LLM override + confidence gate may only move a disposition toward KEEP (`DISCARD`→`UNCERTAIN`→`KEEP`), never toward `DISCARD`.
+- `proposed_cell_type` (minor) / `differs_from_original` (major) are **orthogonal to disposition** — real biology stays KEEP. Both compare against `parent_cluster` (which IS the original `cluster_col` label).
+- `discard_cells.tsv` keyed by `barcode` (= `obs_name`, the stable cross-version key) + `input_row_index` (0-based position in the standissect-input adata, from `adata.obs_names`).
+- Prompt-version bumps: `PROMPT_VERSION` → `standissect-diagnosis-v2`; `NAMING_PROMPT_VERSION` → `standissect-naming-v2`.
 - Spec: `docs/superpowers/specs/2026-06-26-recommend-discard-design.md`.
 
 ## File Structure
 
-- `diagnosis.py` — taxonomy, `DISPOSITION_MAP`, `derive_disposition`, `DiagnosisResult` disposition fields + `finalize_disposition`, engine wiring, LLM schema/prompt. (Tasks 1, 2)
-- `pipeline.py` — `_PANEL_COLS`/`_DIAGNOSIS_COLS`, `run_dissect_pipeline` threshold param, `params.json`, `_Layout.discard_cells`, `_write_cell_dispositions`. (Tasks 3, 4)
-- `report.py` — `_discards_section` + sidebar anchor. (Task 5)
+- `diagnosis.py` — taxonomy, `DISPOSITION_MAP`, `derive_disposition`, `DiagnosisResult` disposition fields + `proposed_cell_type` + `finalize_disposition`, engine wiring, LLM schema/prompt. (Tasks 1, 2)
+- `pipeline.py` — `_PANEL_COLS`/`_DIAGNOSIS_COLS`, `run_dissect_pipeline` threshold + `params.json`, `_Layout.{discard_cells,proposed_cell_types}`, `_write_cell_dispositions`, `_write_proposed_cell_types`. (Tasks 3, 4, 7)
+- `annotate.py` — `CoreNaming.differs_from_original` + naming schema/prompt/parse + `run_naming_stage` rows + `CORE_NAME_COLS`. (Task 6)
+- `report.py` — `_discards_section` + `_proposed_types_section` + sidebar anchors. (Tasks 5, 7)
 - `cli.py` — `--discard-confidence-threshold`. (Task 3)
-- `tests/test_disposition.py` (new), `tests/test_diagnosis_llm.py`, `tests/test_cli.py`, `tests/test_discard_outputs.py` (new), `tests/test_report.py`. (Tasks 1–5)
+- Tests: `tests/test_disposition.py` (new), `tests/test_diagnosis_llm.py`, `tests/test_cli.py`, `tests/test_discard_outputs.py` (new), `tests/test_report.py`, `tests/test_annotate.py`.
 
-**Test import idioms (match existing):** scanpy-free modules import top-level after `sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))` then `import diagnosis` / `import report`. Modules pulling the package (`standissect.cli`, `standissect.pipeline`) use `parents[2]` then `from standissect.X import ...` (loads scanpy — fine on this compute node).
+**Test import idioms (match existing):** scanpy-free modules (`diagnosis`, `annotate`, `report`) import top-level after `sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))`. Modules pulling the package (`standissect.cli`, `standissect.pipeline`) use `parents[2]` + `from standissect.X import ...` (loads scanpy — fine on this compute node).
 
 ---
 
-### Task 1: Disposition core in `diagnosis.py`
+### Task 1: Disposition core + proposed_cell_type field in `diagnosis.py`
 
 **Files:**
 - Modify: `/scratch/users/chensj16/projects/standissect/diagnosis.py` (`ALLOWED_CAUSES` L29-36; `DiagnosisResult` L95-133)
 - Test: `/scratch/users/chensj16/projects/standissect/tests/test_disposition.py` (create)
 
-**Interfaces:**
-- Produces: `ALLOWED_CAUSES` (now 11 values); `DISPOSITION_MAP: dict[str,str]`; `_DISPOSITION_RANK: dict[str,int]`; `derive_disposition(likely_cause, confidence, *, threshold, llm_disposition=None, llm_reason=None) -> (recommended:str, baseline:str, overridden:bool, reason:str)`; `DiagnosisResult` gains `disposition_baseline`, `recommended_disposition`, `disposition_overridden`, `disposition_reason` + `finalize_disposition(threshold, *, llm_disposition=None, llm_reason=None) -> DiagnosisResult`; `to_panel_fields()` emits the 4 new keys.
+**Interfaces — Produces:** `ALLOWED_CAUSES` (11); `DISPOSITION_MAP`; `_DISPOSITION_RANK`; `derive_disposition(likely_cause, confidence, *, threshold, llm_disposition=None, llm_reason=None) -> (recommended, baseline, overridden, reason)`; `DiagnosisResult` gains `disposition_baseline`, `recommended_disposition`, `disposition_overridden`, `disposition_reason`, `proposed_cell_type` + `finalize_disposition(threshold, *, llm_disposition=None, llm_reason=None)`; `to_panel_fields()` emits the 4 disposition keys + `proposed_cell_type`.
 
 - [ ] **Step 1: Write the failing test** — `tests/test_disposition.py`:
 
@@ -46,7 +49,7 @@
 import pathlib
 import sys
 
-_PKG_DIR = pathlib.Path(__file__).resolve().parents[1]   # .../standissect
+_PKG_DIR = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_PKG_DIR))
 
 import diagnosis  # noqa: E402
@@ -68,40 +71,32 @@ def test_disposition_map_covers_exactly_allowed_causes():
 
 
 def test_baseline_mapping_per_cause():
-    assert DISPOSITION_MAP['doublet-driven'] == 'DISCARD'
-    assert DISPOSITION_MAP['low-quality (high mt)'] == 'DISCARD'
-    assert DISPOSITION_MAP['shallow-depth'] == 'DISCARD'
-    assert DISPOSITION_MAP['dissociation-effect'] == 'DISCARD'
-    assert DISPOSITION_MAP['ambient-contamination'] == 'DISCARD'
-    assert DISPOSITION_MAP['cell-cycle'] == 'KEEP'
-    assert DISPOSITION_MAP['sex-driven'] == 'KEEP'
-    assert DISPOSITION_MAP['interferon-response'] == 'KEEP'
-    assert DISPOSITION_MAP['biology-candidate'] == 'KEEP'
-    assert DISPOSITION_MAP['sample-driven'] == 'UNCERTAIN'
-    assert DISPOSITION_MAP['unclear'] == 'UNCERTAIN'
+    for c in ('doublet-driven', 'low-quality (high mt)', 'shallow-depth',
+              'dissociation-effect', 'ambient-contamination'):
+        assert DISPOSITION_MAP[c] == 'DISCARD'
+    for c in ('cell-cycle', 'sex-driven', 'interferon-response', 'biology-candidate'):
+        assert DISPOSITION_MAP[c] == 'KEEP'
+    for c in ('sample-driven', 'unclear'):
+        assert DISPOSITION_MAP[c] == 'UNCERTAIN'
 
 
 def test_gate_downgrades_low_confidence_discard():
-    final, baseline, overridden, _ = derive_disposition(
-        'doublet-driven', 0.3, threshold=0.5)
-    assert (final, baseline, overridden) == ('UNCERTAIN', 'DISCARD', True)
+    assert derive_disposition('doublet-driven', 0.3, threshold=0.5)[:3] == (
+        'UNCERTAIN', 'DISCARD', True)
 
 
 def test_gate_keeps_high_confidence_discard():
-    final, baseline, overridden, _ = derive_disposition(
-        'doublet-driven', 0.9, threshold=0.5)
-    assert (final, baseline, overridden) == ('DISCARD', 'DISCARD', False)
+    assert derive_disposition('doublet-driven', 0.9, threshold=0.5)[:3] == (
+        'DISCARD', 'DISCARD', False)
 
 
 def test_override_relax_toward_keep_is_accepted():
-    final, baseline, overridden, _ = derive_disposition(
-        'doublet-driven', 0.9, threshold=0.5, llm_disposition='KEEP',
-        llm_reason='clearly real cells')
-    assert (final, baseline, overridden) == ('KEEP', 'DISCARD', True)
+    assert derive_disposition('doublet-driven', 0.9, threshold=0.5,
+                              llm_disposition='KEEP', llm_reason='real')[:3] == (
+        'KEEP', 'DISCARD', True)
 
 
 def test_override_escalate_toward_discard_is_rejected():
-    # cell-cycle baseline KEEP; an LLM DISCARD must be clamped back to KEEP
     final, baseline, overridden, reason = derive_disposition(
         'cell-cycle', 0.9, threshold=0.5, llm_disposition='DISCARD',
         llm_reason='looks junky')
@@ -110,19 +105,21 @@ def test_override_escalate_toward_discard_is_rejected():
 
 
 def test_uncertain_baseline_cannot_be_escalated_to_discard():
-    final, _, _, _ = derive_disposition(
-        'unclear', 0.9, threshold=0.5, llm_disposition='DISCARD')
-    assert final == 'UNCERTAIN'
+    assert derive_disposition('unclear', 0.9, threshold=0.5,
+                              llm_disposition='DISCARD')[0] == 'UNCERTAIN'
 
 
-def test_result_sets_disposition_fields_and_panel_fields():
-    r = DiagnosisResult(likely_cause='cell-cycle', confidence=0.9)
+def test_result_disposition_and_proposed_fields_round_trip():
+    r = DiagnosisResult(likely_cause='cell-cycle', confidence=0.9,
+                        proposed_cell_type='pDC')
     assert r.disposition_baseline == 'KEEP'
-    assert r.recommended_disposition == 'KEEP'      # defaulted in __post_init__
+    assert r.recommended_disposition == 'KEEP'
+    assert r.proposed_cell_type == 'pDC'
     pf = r.to_panel_fields()
     for k in ('recommended_disposition', 'disposition_baseline',
-              'disposition_overridden', 'disposition_reason'):
+              'disposition_overridden', 'disposition_reason', 'proposed_cell_type'):
         assert k in pf
+    assert pf['proposed_cell_type'] == 'pDC'
 
 
 def test_finalize_applies_gate():
@@ -130,16 +127,17 @@ def test_finalize_applies_gate():
     r.finalize_disposition(0.5)
     assert r.recommended_disposition == 'UNCERTAIN'
     assert r.disposition_overridden is True
+    assert r.proposed_cell_type is None
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run to verify it fails**
 
 Run: `cd /scratch/users/chensj16/projects/standissect && python -m pytest tests/test_disposition.py -q`
-Expected: FAIL — `ImportError: cannot import name 'DISPOSITION_MAP'` (and `derive_disposition`).
+Expected: FAIL — `ImportError: cannot import name 'DISPOSITION_MAP'`.
 
 - [ ] **Step 3: Implement** — in `diagnosis.py`:
 
-(a) Replace the `ALLOWED_CAUSES` tuple (L29-36) with the 11-value version:
+(a) Replace `ALLOWED_CAUSES` (L29-36) with the 11-value version + add the map/rank/function:
 
 ```python
 ALLOWED_CAUSES = (
@@ -175,10 +173,9 @@ _DISPOSITION_RANK = {'DISCARD': 0, 'UNCERTAIN': 1, 'KEEP': 2}
 
 def derive_disposition(likely_cause, confidence, *, threshold,
                        llm_disposition=None, llm_reason=None):
-    """Map a cause (+ optional LLM pick) to (recommended, baseline, overridden,
-    reason). Conservative-only: an LLM pick is accepted only if it is at least
-    as keep-leaning as the baseline; a DISCARD baseline below ``threshold``
-    confidence is downgraded to UNCERTAIN. Both moves go toward KEEP only."""
+    """(recommended, baseline, overridden, reason). Conservative-only: an LLM
+    pick is accepted only if at least as keep-leaning as the baseline; a DISCARD
+    baseline below ``threshold`` confidence is downgraded to UNCERTAIN."""
     baseline = DISPOSITION_MAP[likely_cause]
     candidate = baseline
     reason = f"{likely_cause} → {baseline} (rule baseline)"
@@ -197,7 +194,7 @@ def derive_disposition(likely_cause, confidence, *, threshold,
     return final, baseline, (final != baseline), reason
 ```
 
-(b) In `DiagnosisResult` (L95-133) add the four fields after `llm_overrode_rule` (all construction is keyword-based, so order is safe):
+(b) `DiagnosisResult` (after `llm_overrode_rule` at L107) add five fields:
 
 ```python
     llm_overrode_rule: bool = False
@@ -205,9 +202,10 @@ def derive_disposition(likely_cause, confidence, *, threshold,
     recommended_disposition: str = ''
     disposition_overridden: bool = False
     disposition_reason: str = ''
+    proposed_cell_type: str | None = None
 ```
 
-(c) Extend `__post_init__` (after the confidence clamp at L120) so a freshly-built result already carries a sensible baseline disposition:
+(c) Extend `__post_init__` (after the confidence clamp at L120):
 
 ```python
         self.confidence = float(min(1.0, max(0.0, self.confidence)))
@@ -220,7 +218,7 @@ def derive_disposition(likely_cause, confidence, *, threshold,
                     f"{self.disposition_baseline} (rule baseline)")
 ```
 
-(d) Add the `finalize_disposition` method (e.g. right after `__post_init__`):
+(d) Add `finalize_disposition` (after `__post_init__`):
 
 ```python
     def finalize_disposition(self, threshold, *, llm_disposition=None,
@@ -235,7 +233,7 @@ def derive_disposition(likely_cause, confidence, *, threshold,
         return self
 ```
 
-(e) Extend `to_panel_fields()` (L125-133) — add the four keys:
+(e) Extend `to_panel_fields()` (L125-133):
 
 ```python
     def to_panel_fields(self) -> dict:
@@ -250,10 +248,11 @@ def derive_disposition(likely_cause, confidence, *, threshold,
             'recommended_disposition': self.recommended_disposition,
             'disposition_overridden': self.disposition_overridden,
             'disposition_reason': self.disposition_reason,
+            'proposed_cell_type': self.proposed_cell_type,
         }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run to verify it passes**
 
 Run: `cd /scratch/users/chensj16/projects/standissect && python -m pytest tests/test_disposition.py -q`
 Expected: PASS (10 tests).
@@ -263,35 +262,32 @@ Expected: PASS (10 tests).
 ```bash
 cd /scratch/users/chensj16/projects/standissect
 git add diagnosis.py tests/test_disposition.py
-git commit -m "feat(diagnosis): disposition map + conservative-only derive + result fields"
+git commit -m "feat(diagnosis): disposition map + conservative derive + result fields + proposed_cell_type"
 ```
 
 ---
 
-### Task 2: Engine wiring + LLM schema/prompt
+### Task 2: Diagnosis engine wiring + LLM schema/prompt (disposition + proposed_cell_type)
 
 **Files:**
-- Modify: `/scratch/users/chensj16/projects/standissect/diagnosis.py` (`RuleDiagnosisEngine.__init__` L272 + `.diagnose` return L337-347; `LLMDiagnosisEngine.__init__` L447-455 + `.diagnose` L457-483; `build_llm_prompt` L486-510; `_diagnosis_from_dict` L513-533; `make_diagnosis_engine` L573-609; `PROMPT_VERSION` L38)
+- Modify: `/scratch/users/chensj16/projects/standissect/diagnosis.py` (`PROMPT_VERSION` L38; `RuleDiagnosisEngine.__init__` L272 + `.diagnose` return L337-347; `LLMDiagnosisEngine.__init__` L447-455 + `.diagnose` L457-471; `build_llm_prompt` L486-510; `_diagnosis_from_dict` L513-533; `make_diagnosis_engine` L573-609)
 - Test: `/scratch/users/chensj16/projects/standissect/tests/test_diagnosis_llm.py` (extend)
 
-**Interfaces:**
-- Consumes: `derive_disposition`, `DiagnosisResult.finalize_disposition`, `DISPOSITION_MAP`, `ALLOWED_CAUSES` (Task 1).
-- Produces: `RuleDiagnosisEngine(diagnosis_roles=None, *, discard_confidence_threshold=0.5)`; `LLMDiagnosisEngine(client, *, mode='llm', fallback_to_rule=True, diagnosis_roles=None, llm_retries=3, discard_confidence_threshold=0.5)`; `_diagnosis_from_dict(data, *, rule_baseline, mode, model, threshold=0.5)`; `make_diagnosis_engine(..., discard_confidence_threshold=0.5)`; module-level `CAUSE_SIGNATURES: dict`, `DISPOSITION_POLICY: str`; `PROMPT_VERSION == 'standissect-diagnosis-v2'`.
+**Interfaces — Consumes:** Task 1. **Produces:** `RuleDiagnosisEngine(diagnosis_roles=None, *, discard_confidence_threshold=0.5)`; `LLMDiagnosisEngine(..., discard_confidence_threshold=0.5)`; `_diagnosis_from_dict(data, *, rule_baseline, mode, model, threshold=0.5)`; `make_diagnosis_engine(..., discard_confidence_threshold=0.5)`; `CAUSE_SIGNATURES`, `DISPOSITION_POLICY`; `PROMPT_VERSION == 'standissect-diagnosis-v2'`.
 
 - [ ] **Step 1: Write the failing tests** — append to `tests/test_diagnosis_llm.py`:
 
 ```python
-def test_prompt_advertises_disposition_and_eleven_causes():
+def test_prompt_advertises_disposition_proposed_and_eleven_causes():
     from diagnosis import build_llm_prompt, MinorEvidence, ALLOWED_CAUSES
     ev = MinorEvidence(parent_cluster="0", subcluster="c0_1",
                        reference_subcluster="c0_0", minor_umap_label="u1",
                        main_umap_label="u0", n_cells=10, frac_of_parent=0.1)
     system, user = build_llm_prompt(ev, mode="llm")
     assert len(ALLOWED_CAUSES) == 11
-    assert "recommended_disposition" in user
-    assert "disposition_reason" in user
-    assert "cause_signatures" in user
-    # conservative-only rule is communicated to the model
+    for key in ("recommended_disposition", "disposition_reason",
+                "proposed_cell_type", "cause_signatures"):
+        assert key in user
     assert "escalate" in (system + user).lower()
 
 
@@ -301,14 +297,12 @@ def test_rule_engine_result_carries_disposition_baseline():
     r = eng.diagnose(MinorEvidence(parent_cluster="0", subcluster="c0_1",
                      reference_subcluster="c0_0", minor_umap_label="u1",
                      main_umap_label="u0", n_cells=10, frac_of_parent=0.1))
-    # default 'unclear' -> UNCERTAIN baseline, no override
     assert r.recommended_disposition == r.disposition_baseline
     assert r.disposition_overridden is False
-    assert r.recommended_disposition in {"DISCARD", "KEEP", "UNCERTAIN"}
+    assert r.proposed_cell_type is None
 
 
 def test_llm_disposition_parsed_and_clamped():
-    # cause cell-cycle (baseline KEEP) + llm DISCARD -> clamped to KEEP
     payload = json.dumps({"likely_cause": "cell-cycle", "confidence": 0.9,
                           "rationale": "cycling", "recommended_disposition": "DISCARD",
                           "disposition_reason": "looks junky"})
@@ -321,13 +315,22 @@ def test_llm_missing_disposition_falls_back_to_baseline():
     payload = json.dumps({"likely_cause": "doublet-driven", "confidence": 0.9,
                           "rationale": "doublets"})
     r = parse_llm_result(payload, rule_baseline=None, mode="llm", model=None)
-    assert r.recommended_disposition == "DISCARD"   # baseline, high confidence
+    assert r.recommended_disposition == "DISCARD"
+    assert r.proposed_cell_type is None
+
+
+def test_llm_proposed_cell_type_parsed():
+    payload = json.dumps({"likely_cause": "biology-candidate", "confidence": 0.8,
+                          "rationale": "distinct program",
+                          "proposed_cell_type": "pDC"})
+    r = parse_llm_result(payload, rule_baseline=None, mode="llm", model=None)
+    assert r.proposed_cell_type == "pDC"
+    assert r.recommended_disposition == "KEEP"
 
 
 def test_new_cause_dissociation_is_accepted_by_llm():
     payload = json.dumps({"likely_cause": "dissociation-effect", "confidence": 0.8,
-                          "rationale": "HSP + IEG", "recommended_disposition": "DISCARD",
-                          "disposition_reason": "stress signature"})
+                          "rationale": "HSP + IEG", "recommended_disposition": "DISCARD"})
     r = parse_llm_result(payload, rule_baseline=None, mode="llm", model=None)
     assert r.likely_cause == "dissociation-effect"
     assert r.recommended_disposition == "DISCARD"
@@ -336,17 +339,17 @@ def test_new_cause_dissociation_is_accepted_by_llm():
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `cd /scratch/users/chensj16/projects/standissect && python -m pytest tests/test_diagnosis_llm.py -q`
-Expected: FAIL — `TypeError: __init__() got an unexpected keyword argument 'discard_confidence_threshold'` / missing prompt keys.
+Expected: FAIL — `TypeError: ... unexpected keyword argument 'discard_confidence_threshold'` / missing prompt keys.
 
 - [ ] **Step 3: Implement** — in `diagnosis.py`:
 
-(a) Bump `PROMPT_VERSION` (L38):
+(a) `PROMPT_VERSION` (L38):
 
 ```python
 PROMPT_VERSION = 'standissect-diagnosis-v2'
 ```
 
-(b) Add module-level guidance near `build_llm_prompt` (before it):
+(b) Module-level guidance before `build_llm_prompt`:
 
 ```python
 CAUSE_SIGNATURES = {
@@ -368,14 +371,16 @@ DISPOSITION_POLICY = (
     "doublet-driven/low-quality (high mt)/shallow-depth/dissociation-effect/"
     "ambient-contamination -> DISCARD; cell-cycle/sex-driven/interferon-response/"
     "biology-candidate -> KEEP; sample-driven/unclear -> UNCERTAIN. You MAY relax "
-    "recommended_disposition toward KEEP (DISCARD->UNCERTAIN->KEEP) when the "
-    "evidence supports keeping the cells, and you MUST give disposition_reason. "
-    "You may NOT escalate toward DISCARD via recommended_disposition; to mark a "
-    "cluster as junk, pick a discard-type likely_cause instead."
+    "recommended_disposition toward KEEP (DISCARD->UNCERTAIN->KEEP) when evidence "
+    "supports keeping the cells, and MUST give disposition_reason. You may NOT "
+    "escalate toward DISCARD via recommended_disposition; to mark a cluster as "
+    "junk, pick a discard-type likely_cause instead. If the fragment is a real, "
+    "distinct or finer cell type than its parent (parent_cluster), set "
+    "proposed_cell_type to that cell-type name; otherwise null."
 )
 ```
 
-(c) Extend `build_llm_prompt` (L486-510) — add the two schema keys, mention the policy in the system prompt, and add `cause_signatures` + `disposition_policy` to the user payload:
+(c) `build_llm_prompt` (L486-510) — add three schema keys, mention the policy, add `cause_signatures` + `disposition_policy` to the payload:
 
 ```python
 def build_llm_prompt(evidence: MinorEvidence, *, mode='hybrid') -> tuple[str, str]:
@@ -390,14 +395,15 @@ def build_llm_prompt(evidence: MinorEvidence, *, mode='hybrid') -> tuple[str, st
         'llm_overrode_rule': 'boolean',
         'recommended_disposition': ['DISCARD', 'KEEP', 'UNCERTAIN'],
         'disposition_reason': 'short phrase justifying the disposition',
+        'proposed_cell_type': 'specific cell-type name if a real distinct/finer type than parent, else null',
     }
     system = (
         "You diagnose minor fragments inside single-cell clusters. "
         "Use only the supplied statistical evidence. Do not invent measurements, "
         "cell types, markers, or experiments. Choose exactly one likely_cause "
         "from the allowed enum, matching species-appropriate gene orthologs. "
-        "Then set recommended_disposition following disposition_policy: you may "
-        "relax toward KEEP but must NOT escalate toward DISCARD. Return strict JSON only."
+        "Set recommended_disposition per disposition_policy: relax toward KEEP "
+        "but NEVER escalate toward DISCARD. Return strict JSON only."
     )
     user = json.dumps({
         'task': 'diagnose_one_minor_fragment',
@@ -411,7 +417,7 @@ def build_llm_prompt(evidence: MinorEvidence, *, mode='hybrid') -> tuple[str, st
     return system, user
 ```
 
-(d) `_diagnosis_from_dict` (L513-533) — add `threshold=0.5`, then finalize the built result with the LLM's disposition pick:
+(d) `_diagnosis_from_dict` (L513-533) — add `threshold=0.5`, finalize disposition, set `proposed_cell_type`:
 
 ```python
 def _diagnosis_from_dict(data, *, rule_baseline, mode, model, threshold=0.5) -> DiagnosisResult:
@@ -439,10 +445,12 @@ def _diagnosis_from_dict(data, *, rule_baseline, mode, model, threshold=0.5) -> 
         threshold,
         llm_disposition=data.get('recommended_disposition'),
         llm_reason=data.get('disposition_reason'))
+    pct = data.get('proposed_cell_type')
+    result.proposed_cell_type = str(pct).strip() if pct and str(pct).strip() else None
     return result
 ```
 
-(e) `RuleDiagnosisEngine.__init__` (L272-273) — accept and store the threshold:
+(e) `RuleDiagnosisEngine.__init__` (L272-273):
 
 ```python
     def __init__(self, diagnosis_roles=None, *, discard_confidence_threshold=0.5):
@@ -468,7 +476,7 @@ def _diagnosis_from_dict(data, *, rule_baseline, mode, model, threshold=0.5) -> 
         return result
 ```
 
-(g) `LLMDiagnosisEngine.__init__` (L447-455) — accept the threshold, store it, and pass it to the internal rule engine; then thread it into the `_diagnosis_from_dict` call in `.diagnose` (L467-469):
+(g) `LLMDiagnosisEngine.__init__` (L447-455) — threshold + pass to rule engine:
 
 ```python
     def __init__(self, client, *, mode='llm', fallback_to_rule=True,
@@ -486,7 +494,7 @@ def _diagnosis_from_dict(data, *, rule_baseline, mode, model, threshold=0.5) -> 
         self.llm_retries = llm_retries
 ```
 
-In `.diagnose`, the inner lambda becomes (note the new `threshold=`):
+In `.diagnose`, the inner lambda (L467-469) gains `threshold=`:
 
 ```python
                     lambda data: _diagnosis_from_dict(
@@ -495,26 +503,9 @@ In `.diagnose`, the inner lambda becomes (note the new `threshold=`):
                         threshold=self.discard_confidence_threshold)),
 ```
 
-(The fallback `fallback = baseline` path already carries a finalized disposition, because `baseline` came from `self.rule_engine.diagnose(...)`.)
-
-(h) `make_diagnosis_engine` (L573-609) — add the param and pass it to both engines:
+(h) `make_diagnosis_engine` (L573-609) — add `discard_confidence_threshold: float = 0.5` to the signature and pass it to both engines:
 
 ```python
-def make_diagnosis_engine(
-    *,
-    mode: str = 'rule',
-    llm_client=None,
-    ark_api_key: str | None = None,
-    ark_api_key_env: str = 'ARK_API_KEY',
-    ark_model: str = DEFAULT_ARK_MODEL,
-    ark_endpoint: str = DEFAULT_ARK_ENDPOINT,
-    timeout: int = 120,
-    fallback_to_rule: bool = True,
-    diagnosis_roles=None,
-    llm_retries: int = 3,
-    discard_confidence_threshold: float = 0.5,
-):
-    ...
     if mode == 'rule':
         return RuleDiagnosisEngine(
             diagnosis_roles,
@@ -529,14 +520,14 @@ def make_diagnosis_engine(
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `cd /scratch/users/chensj16/projects/standissect && python -m pytest tests/test_diagnosis_llm.py tests/test_disposition.py -q`
-Expected: PASS (existing diagnosis tests + 5 new + Task 1 tests). The existing `test_call_structured_with_callable_client_builds_result` and `parse_llm_result` tests still pass because `threshold` defaults to `0.5`.
+Expected: PASS (existing + 6 new + Task 1). Existing `parse_llm_result`/`call_structured` tests still pass (`threshold` defaults to 0.5).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 cd /scratch/users/chensj16/projects/standissect
 git add diagnosis.py tests/test_diagnosis_llm.py
-git commit -m "feat(diagnosis): engine threshold + LLM disposition schema/prompt (v2)"
+git commit -m "feat(diagnosis): engine threshold + LLM disposition/proposed_cell_type schema (v2)"
 ```
 
 ---
@@ -544,13 +535,11 @@ git commit -m "feat(diagnosis): engine threshold + LLM disposition schema/prompt
 ### Task 3: Pipeline threshold param + CLI + params.json
 
 **Files:**
-- Modify: `/scratch/users/chensj16/projects/standissect/pipeline.py` (`run_dissect_pipeline` signature L624-668; engine build L738-749; `params.json` L953-988)
-- Modify: `/scratch/users/chensj16/projects/standissect/cli.py` (diag arg group L91-92; `run_cmd` L122-160)
-- Test: `/scratch/users/chensj16/projects/standissect/tests/test_cli.py` (extend)
+- Modify: `pipeline.py` (`run_dissect_pipeline` signature L624-668; engine build L738-749; `params.json` L953-988)
+- Modify: `cli.py` (diag arg group after L92; `run_cmd` near L158)
+- Test: `tests/test_cli.py` (extend)
 
-**Interfaces:**
-- Consumes: `make_diagnosis_engine(..., discard_confidence_threshold=...)` (Task 2).
-- Produces: `run_dissect_pipeline(..., discard_confidence_threshold=0.5)`; CLI flag `--discard-confidence-threshold` → `args.discard_confidence_threshold`; `params.json['discard_confidence_threshold']`.
+**Interfaces — Consumes:** `make_diagnosis_engine(..., discard_confidence_threshold=...)` (Task 2). **Produces:** `run_dissect_pipeline(..., discard_confidence_threshold=0.5)`; CLI `--discard-confidence-threshold` → `args.discard_confidence_threshold`; `params.json['discard_confidence_threshold']`.
 
 - [ ] **Step 1: Write the failing tests** — append to `tests/test_cli.py`:
 
@@ -570,11 +559,11 @@ def test_cli_discard_threshold_override():
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `cd /scratch/users/chensj16/projects/standissect && python -m pytest tests/test_cli.py -q`
-Expected: FAIL — `AttributeError: 'Namespace' object has no attribute 'discard_confidence_threshold'`.
+Expected: FAIL — `AttributeError: ... 'discard_confidence_threshold'`.
 
 - [ ] **Step 3: Implement**
 
-(a) `cli.py` — add the flag in the `diag` group after `--ark-timeout` (L92):
+(a) `cli.py` — add the flag after `--ark-timeout` (L92):
 
 ```python
     diag.add_argument('--discard-confidence-threshold', type=float, default=0.5,
@@ -582,7 +571,7 @@ Expected: FAIL — `AttributeError: 'Namespace' object has no attribute 'discard
                            'downgraded to UNCERTAIN (kept + flagged). Default: 0.5.')
 ```
 
-(b) `cli.py` — pass it in the `run_dissect_pipeline(...)` call in `run_cmd` (add near L158, beside `diagnosis_timeout`):
+(b) `cli.py` — pass it in `run_cmd` (near L158):
 
 ```python
         diagnosis_timeout=args.ark_timeout,
@@ -590,7 +579,7 @@ Expected: FAIL — `AttributeError: 'Namespace' object has no attribute 'discard
         random_state=args.random_state,
 ```
 
-(c) `pipeline.py` — add the param to `run_dissect_pipeline` (after `llm_retries=3,` at L666):
+(c) `pipeline.py` — add the param to `run_dissect_pipeline` (after `llm_retries=3,` L666):
 
 ```python
     llm_retries=3,
@@ -598,7 +587,7 @@ Expected: FAIL — `AttributeError: 'Namespace' object has no attribute 'discard
     random_state=0,
 ```
 
-(d) `pipeline.py` — pass it to `make_diagnosis_engine` (in the call at L738-749, add a kwarg):
+(d) `pipeline.py` — pass to `make_diagnosis_engine` (L738-749):
 
 ```python
         diagnosis_roles=resolved_roles,
@@ -607,7 +596,7 @@ Expected: FAIL — `AttributeError: 'Namespace' object has no attribute 'discard
     )
 ```
 
-(e) `pipeline.py` — record it in `params.json` (add inside the dict near L986):
+(e) `pipeline.py` — record in `params.json` (near L986):
 
 ```python
         'diagnosis_timeout': diagnosis_timeout,
@@ -618,7 +607,7 @@ Expected: FAIL — `AttributeError: 'Namespace' object has no attribute 'discard
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `cd /scratch/users/chensj16/projects/standissect && python -m pytest tests/test_cli.py -q`
-Expected: PASS (existing cli tests + 2 new).
+Expected: PASS (existing + 2 new).
 
 - [ ] **Step 5: Commit**
 
@@ -630,15 +619,13 @@ git commit -m "feat(pipeline,cli): --discard-confidence-threshold + params.json"
 
 ---
 
-### Task 4: panel/diagnosis columns + per-cell disposition + discard_cells.tsv
+### Task 4: panel/diagnosis columns + per-cell disposition + cell-precise discard_cells.tsv
 
 **Files:**
-- Modify: `/scratch/users/chensj16/projects/standissect/pipeline.py` (`_PANEL_COLS` L50-55; `_DIAGNOSIS_COLS` L57-61; `_Layout` L64-95; terminal aggregation L870-880; add helper `_write_cell_dispositions`)
-- Test: `/scratch/users/chensj16/projects/standissect/tests/test_discard_outputs.py` (create)
+- Modify: `pipeline.py` (`_PANEL_COLS` L50-55; `_DIAGNOSIS_COLS` L57-61; `_Layout` L64-95; add `_write_cell_dispositions` near L158; terminal aggregation L877)
+- Test: `tests/test_discard_outputs.py` (create)
 
-**Interfaces:**
-- Consumes: a global `panel.tsv` whose rows carry `recommended_disposition` etc. (Tasks 2–3); `cell_labels.tsv` with index = barcode and columns `umap_cluster`, `original_cluster_split` (`subcluster` of the form `c{parent}_{rank}`).
-- Produces: `_Layout.discard_cells` → `<root>/discard_cells.tsv`; module-level `_write_cell_dispositions(lay, panel) -> None`; `_PANEL_COLS`/`_DIAGNOSIS_COLS` each gain the 4 disposition columns.
+**Interfaces — Consumes:** a global `panel.tsv` carrying the disposition columns + `proposed_cell_type` (Tasks 2–3); `cell_labels.tsv` (index = barcode, column `original_cluster_split` = `c{parent}_{rank}` = `panel.subcluster`); `adata.obs_names`. **Produces:** `_Layout.discard_cells`; `_write_cell_dispositions(lay, panel, obs_names) -> None`; `_DISCARD_CELL_COLS`; the 5 new panel columns.
 
 - [ ] **Step 1: Write the failing test** — `tests/test_discard_outputs.py`:
 
@@ -648,7 +635,7 @@ import sys
 
 import pandas as pd
 
-_PKG_PARENT = pathlib.Path(__file__).resolve().parents[2]   # .../projects
+_PKG_PARENT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_PKG_PARENT))
 
 from standissect.pipeline import (_write_cell_dispositions, _Layout,  # noqa: E402
@@ -664,35 +651,38 @@ def _panel():
         'diagnosis_confidence': [0.9, 0.8, 0.4],
         'recommended_disposition': ['DISCARD', 'KEEP', 'UNCERTAIN'],
         'disposition_reason': ['doublets', 'cycling', 'unclear'],
+        'proposed_cell_type': [None, 'cycling T', None],
     })
 
 
-def test_panel_cols_include_disposition_columns():
+def test_panel_cols_include_disposition_and_proposed_columns():
     for c in ('recommended_disposition', 'disposition_baseline',
-              'disposition_overridden', 'disposition_reason'):
+              'disposition_overridden', 'disposition_reason', 'proposed_cell_type'):
         assert c in _PANEL_COLS
         assert c in _DIAGNOSIS_COLS
 
 
-def test_cell_labels_gets_disposition_and_discard_file(tmp_path):
+def test_cell_labels_and_discard_file_with_input_row_index(tmp_path):
     lay = _Layout(tmp_path, 'leiden')
     lay.root.mkdir(parents=True)
+    obs_names = ['AAA', 'BBB', 'CCC', 'DDD']
     pd.DataFrame(
         {'umap_cluster': ['a', 'a', 'b', 'b'],
          'original_cluster_split': ['c0_1', 'c0_2', 'c1_1', 'c0_1']},
-        index=['AAA', 'BBB', 'CCC', 'DDD'],
+        index=obs_names,
     ).to_csv(lay.cell_labels, sep='\t')
 
-    _write_cell_dispositions(lay, _panel())
+    _write_cell_dispositions(lay, _panel(), obs_names)
 
     labels = pd.read_csv(lay.cell_labels, sep='\t', index_col=0)
     assert list(labels['recommended_disposition']) == ['DISCARD', 'KEEP',
                                                         'UNCERTAIN', 'DISCARD']
     discard = pd.read_csv(lay.discard_cells, sep='\t')
-    assert sorted(discard['barcode']) == ['AAA', 'DDD']        # only DISCARD cells
-    assert set(discard.columns) == {'barcode', 'subcluster', 'parent_cluster',
-                                    'likely_cause', 'diagnosis_confidence',
-                                    'disposition_reason'}
+    assert sorted(discard['barcode']) == ['AAA', 'DDD']
+    assert sorted(discard['input_row_index']) == [0, 3]      # positions in obs_names
+    assert list(discard.columns) == ['barcode', 'input_row_index', 'subcluster',
+                                     'parent_cluster', 'likely_cause',
+                                     'diagnosis_confidence', 'disposition_reason']
     assert set(discard['subcluster']) == {'c0_1'}
 
 
@@ -701,10 +691,10 @@ def test_empty_discard_writes_header_only(tmp_path):
     lay.root.mkdir(parents=True)
     pd.DataFrame({'umap_cluster': ['a'], 'original_cluster_split': ['c0_2']},
                  index=['AAA']).to_csv(lay.cell_labels, sep='\t')
-    _write_cell_dispositions(lay, _panel())          # c0_2 -> KEEP
+    _write_cell_dispositions(lay, _panel(), ['AAA'])
     discard = pd.read_csv(lay.discard_cells, sep='\t')
     assert len(discard) == 0
-    assert 'barcode' in discard.columns
+    assert 'barcode' in discard.columns and 'input_row_index' in discard.columns
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -714,7 +704,7 @@ Expected: FAIL — `ImportError: cannot import name '_write_cell_dispositions'`.
 
 - [ ] **Step 3: Implement** — in `pipeline.py`:
 
-(a) Append the 4 columns to `_PANEL_COLS` (L50-55) and `_DIAGNOSIS_COLS` (L57-61):
+(a) Append 5 columns to `_PANEL_COLS` (L50-55) and `_DIAGNOSIS_COLS` (L57-61):
 
 ```python
 _PANEL_COLS = ['parent_cluster', 'subcluster', 'reference_subcluster',
@@ -724,7 +714,7 @@ _PANEL_COLS = ['parent_cluster', 'subcluster', 'reference_subcluster',
                'likely_cause', 'cause_detail', 'diagnosis_confidence',
                'diagnosis_rationale', 'llm_overrode_rule',
                'disposition_baseline', 'recommended_disposition',
-               'disposition_overridden', 'disposition_reason']
+               'disposition_overridden', 'disposition_reason', 'proposed_cell_type']
 
 _DIAGNOSIS_COLS = ['parent_cluster', 'subcluster', 'reference_subcluster',
                    'minor_umap_label', 'main_umap_label', 'n_cells', 'frac_of_parent',
@@ -732,10 +722,10 @@ _DIAGNOSIS_COLS = ['parent_cluster', 'subcluster', 'reference_subcluster',
                    'diagnosis_confidence', 'diagnosis_rationale',
                    'llm_overrode_rule', 'disposition_baseline',
                    'recommended_disposition', 'disposition_overridden',
-                   'disposition_reason']
+                   'disposition_reason', 'proposed_cell_type']
 ```
 
-(b) Add a `discard_cells` property to `_Layout` (after `cell_labels`, L77):
+(b) Add `discard_cells` to `_Layout` (after `cell_labels`, L77):
 
 ```python
     @property
@@ -744,16 +734,17 @@ _DIAGNOSIS_COLS = ['parent_cluster', 'subcluster', 'reference_subcluster',
     def discard_cells(self): return self.root / 'discard_cells.tsv'
 ```
 
-(c) Add the helper near the other module-level pipeline helpers (e.g. just below `_ordered_panel`, ~L158):
+(c) Add the helper after `_ordered_panel` (~L158):
 
 ```python
-_DISCARD_CELL_COLS = ['barcode', 'subcluster', 'parent_cluster', 'likely_cause',
-                      'diagnosis_confidence', 'disposition_reason']
+_DISCARD_CELL_COLS = ['barcode', 'input_row_index', 'subcluster', 'parent_cluster',
+                      'likely_cause', 'diagnosis_confidence', 'disposition_reason']
 
 
-def _write_cell_dispositions(lay, panel):
-    """Join recommended_disposition onto cell_labels.tsv (per cell) and write
-    discard_cells.tsv (only cells whose cluster is recommended DISCARD)."""
+def _write_cell_dispositions(lay, panel, obs_names):
+    """Join recommended_disposition onto cell_labels.tsv (per cell), and write
+    discard_cells.tsv (DISCARD cells only), keyed by barcode (obs_name) with the
+    0-based row position in the standissect-input adata (from obs_names)."""
     if not lay.cell_labels.exists():
         return
     labels = pd.read_csv(lay.cell_labels, sep='\t', index_col=0)
@@ -773,9 +764,12 @@ def _write_cell_dispositions(lay, panel):
     labels['recommended_disposition'] = col('recommended_disposition').fillna('')
     labels.to_csv(lay.cell_labels, sep='\t')
 
+    pos = {str(b): i for i, b in enumerate(obs_names)}
     mask = (labels['recommended_disposition'] == 'DISCARD').values
+    bc = labels.index[mask]
     discard = pd.DataFrame({
-        'barcode': labels.index[mask],
+        'barcode': bc,
+        'input_row_index': [pos.get(str(b)) for b in bc],
         'subcluster': sub[mask].values,
         'parent_cluster': col('parent_cluster')[mask].values,
         'likely_cause': col('likely_cause')[mask].values,
@@ -785,12 +779,12 @@ def _write_cell_dispositions(lay, panel):
     discard.to_csv(lay.discard_cells, sep='\t', index=False)
 ```
 
-(d) Call it in the terminal aggregation, right after `diagnosis_all` is written (after L877):
+(d) Call it in the terminal aggregation, right after `diagnosis_all` is written (after L877), passing `adata.obs_names`:
 
 ```python
     diag_cols = [c for c in _DIAGNOSIS_COLS if c in panel.columns]
     panel[diag_cols].to_csv(lay.diagnosis_all, sep='\t', index=False)
-    _write_cell_dispositions(lay, panel)
+    _write_cell_dispositions(lay, panel, adata.obs_names)
 ```
 
 - [ ] **Step 4: Run to verify it passes**
@@ -803,7 +797,7 @@ Expected: PASS (3 tests).
 ```bash
 cd /scratch/users/chensj16/projects/standissect
 git add pipeline.py tests/test_discard_outputs.py
-git commit -m "feat(pipeline): disposition panel columns + per-cell join + discard_cells.tsv"
+git commit -m "feat(pipeline): disposition columns + per-cell join + cell-precise discard_cells.tsv"
 ```
 
 ---
@@ -811,12 +805,10 @@ git commit -m "feat(pipeline): disposition panel columns + per-cell join + disca
 ### Task 5: report "Recommended discards" section
 
 **Files:**
-- Modify: `/scratch/users/chensj16/projects/standissect/report.py` (`build_report` sidebar L125 + overview insert after L150; add `_discards_section`)
-- Test: `/scratch/users/chensj16/projects/standissect/tests/test_report.py` (extend)
+- Modify: `report.py` (`build_report` sidebar L125 + insert after L150; add `_discards_section`)
+- Test: `tests/test_report.py` (extend)
 
-**Interfaces:**
-- Consumes: `<root>/panel.tsv` with a `recommended_disposition` column.
-- Produces: `_discards_section(root) -> str`; a `<h2 id="discards">` section + a `<a href="#discards">` sidebar anchor in `build_report`.
+**Interfaces — Consumes:** `<root>/panel.tsv` with `recommended_disposition`. **Produces:** `_discards_section(root) -> str`; `<h2 id="discards">` + `<a href="#discards">` in `build_report`.
 
 - [ ] **Step 1: Write the failing tests** — append to `tests/test_report.py`:
 
@@ -835,15 +827,14 @@ def test_report_has_discards_section(tmp_path):
     html = pathlib.Path(out).read_text(encoding="utf-8")
     assert 'id="discards"' in html
     assert 'href="#discards"' in html
-    assert "1" in html and "12" in html          # 1 cluster, 12 cells
-    assert "c0_1" in html                          # the DISCARD cluster row
+    assert "12" in html and "c0_1" in html
 
 
 def test_report_discards_section_handles_no_discards(tmp_path):
     root = tmp_path / "out" / "leiden"
     (root / "clusters" / "c0").mkdir(parents=True)
-    pd.DataFrame({"parent_cluster": ["0"], "subcluster": ["c0_1"],
-                  "n_cells": [9], "likely_cause": ["biology-candidate"],
+    pd.DataFrame({"parent_cluster": ["0"], "subcluster": ["c0_1"], "n_cells": [9],
+                  "likely_cause": ["biology-candidate"],
                   "recommended_disposition": ["KEEP"]}
                  ).to_csv(root / "panel.tsv", sep="\t", index=False)
     out = report.build_report(str(root))
@@ -859,7 +850,7 @@ Expected: FAIL — `id="discards"` not found.
 
 - [ ] **Step 3: Implement** — in `report.py`:
 
-(a) Add the section builder (e.g. after `_table`, ~L47):
+(a) Add `_discards_section` after `_table` (~L47):
 
 ```python
 def _discards_section(root):
@@ -899,7 +890,7 @@ def _discards_section(root):
     return '\n'.join(h)
 ```
 
-(b) Add the sidebar anchor in `build_report` (after L125 `h.append('<a href="#overview">Overview</a>')`):
+(b) Add the sidebar anchor in `build_report` (after L125):
 
 ```python
     h.append('<a href="#overview">Overview</a>')
@@ -919,7 +910,7 @@ def _discards_section(root):
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `cd /scratch/users/chensj16/projects/standissect && python -m pytest tests/test_report.py -q`
-Expected: PASS (existing report tests + 2 new).
+Expected: PASS (existing + 2 new).
 
 - [ ] **Step 5: Commit**
 
@@ -931,22 +922,372 @@ git commit -m "feat(report): Recommended discards section + sidebar anchor"
 
 ---
 
-### Task 6: Full-suite + Marrow e2e
+### Task 6: Naming "differs from original" in `annotate.py`
 
 **Files:**
-- No source changes (verification only). Reuses the preprocessed Marrow h5ad from the concurrency feature's e2e.
+- Modify: `annotate.py` (`NAMING_PROMPT_VERSION` L34; `CoreNaming` L109-138; `build_core_naming_prompt` L214-235; `_core_naming_from_dict` L238-253; `run_naming_stage` rows L485-493; `CORE_NAME_COLS` L381-382)
+- Test: `tests/test_annotate.py` (extend)
 
-**Interfaces:**
-- Consumes: everything from Tasks 1–5.
+**Interfaces — Consumes:** `CoreEvidence.parent_cluster` (already the original annotation). **Produces:** `CoreNaming.differs_from_original: bool`; naming schema key `differs_from_original`; `to_core_name_row` gains `original_label` + `differs_from_original`; `CORE_NAME_COLS` gains both; `NAMING_PROMPT_VERSION == 'standissect-naming-v2'`.
 
-- [ ] **Step 1: Run the full unit suite**
+- [ ] **Step 1: Write the failing tests** — append to `tests/test_annotate.py`:
+
+```python
+def test_naming_prompt_advertises_differs_and_cites_parent():
+    system, user = annotate.build_core_naming_prompt(_evi(["IL3RA"], parent="myeloid"))
+    assert "differs_from_original" in user
+    assert "parent_cluster" in (system + user)
+
+
+def test_core_naming_from_dict_parses_differs_and_original_label():
+    evi = _evi(["IL3RA", "CLEC4C"], parent="myeloid")
+    data = {"cell_type": "pDC", "confidence": 0.9, "rationale": "pDC markers",
+            "differs_from_original": True, "markers_used": ["IL3RA"]}
+    naming = annotate._core_naming_from_dict(data, evi, model="m")
+    assert naming.differs_from_original is True
+    row = naming.to_core_name_row(evi)
+    assert row["original_label"] == "myeloid"
+    assert row["differs_from_original"] is True
+    assert "original_label" in annotate.CORE_NAME_COLS
+    assert "differs_from_original" in annotate.CORE_NAME_COLS
+
+
+def test_run_naming_stage_writes_relabel_columns(tmp_path):
+    from diagnosis import CallableChatClient
+    clusters = tmp_path / "clusters"
+    canon = tmp_path / "canonical_markers"
+    (clusters / "cmyeloid").mkdir(parents=True)
+    canon.mkdir(parents=True)
+    pd.DataFrame({"gene": ["IL3RA", "CLEC4C"], "logfoldchanges": [2.0, 2.0],
+                  "scores": [10.0, 9.0]}
+                 ).to_csv(canon / "markers_cmyeloid_0.tsv", sep="\t", index=False)
+    client = CallableChatClient(lambda s, u: json.dumps(
+        {"cell_type": "pDC", "confidence": 0.9, "rationale": "pDC markers",
+         "differs_from_original": True, "markers_used": ["IL3RA"]}), model="m")
+    engine = annotate.make_naming_engine(client=client)
+    annotate.run_naming_stage(clusters_dir=clusters, canonical_dir=canon,
+        core_names_path=tmp_path / "core_names.tsv", parents=["myeloid"],
+        engine=engine, forced=True)
+    df = pd.read_csv(tmp_path / "core_names.tsv", sep="\t")
+    assert df.loc[0, "cell_type"] == "pDC"
+    assert str(df.loc[0, "original_label"]) == "myeloid"
+    assert bool(df.loc[0, "differs_from_original"]) is True
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cd /scratch/users/chensj16/projects/standissect && python -m pytest tests/test_annotate.py -q`
+Expected: FAIL — `differs_from_original` absent from prompt / `CoreNaming` / columns.
+
+- [ ] **Step 3: Implement** — in `annotate.py`:
+
+(a) `NAMING_PROMPT_VERSION` (L34):
+
+```python
+NAMING_PROMPT_VERSION = 'standissect-naming-v2'
+```
+
+(b) `CoreNaming` (L109-121) — add the field (after `error`):
+
+```python
+    error: str | None = None
+    differs_from_original: bool = False
+```
+
+(c) `to_core_name_row` (L129-138) — add `original_label` + `differs_from_original`:
+
+```python
+    def to_core_name_row(self, evidence: CoreEvidence) -> dict:
+        return {
+            'parent_cluster': evidence.parent_cluster,
+            'core_subcluster': evidence.core_subcluster,
+            'cell_type': self.cell_type,
+            'confidence': self.confidence,
+            'rationale': self.rationale,
+            'source': self.source,
+            'model': self.model,
+            'original_label': evidence.parent_cluster,
+            'differs_from_original': self.differs_from_original,
+        }
+```
+
+(d) `build_core_naming_prompt` (L214-235) — schema key + system instruction:
+
+```python
+def build_core_naming_prompt(evidence: CoreEvidence) -> tuple[str, str]:
+    schema = {
+        'cell_type': 'cell type/state name, or "uncertain"',
+        'confidence': 'number from 0 to 1',
+        'rationale': 'one concise sentence citing supplied markers',
+        'markers_used': ['subset of the supplied marker genes'],
+        'alternatives': ['other plausible cell types'],
+        'differs_from_original': 'true if your cell_type denotes a different '
+                                 'identity than the cluster\'s existing annotation '
+                                 '(evidence.parent_cluster), else false',
+    }
+    system = (
+        "You are a single-cell biologist. Name the most likely cell type or state "
+        "for a cluster from its ranked canonical marker genes, using established "
+        "marker-to-cell-type knowledge. If the markers are ambiguous, return "
+        '"uncertain" with low confidence. Cite only markers from the supplied '
+        "list; do not introduce markers that are not listed. The cluster's "
+        "existing annotation label is provided as evidence.parent_cluster; set "
+        "differs_from_original=true when your cell_type denotes a semantically "
+        "different identity than that label. Return strict JSON only."
+    )
+    user = json.dumps({
+        'task': 'name_one_canonical_core',
+        'tissue_hint': evidence.hint,
+        'output_schema': schema,
+        'evidence': evidence.to_dict(),
+    }, ensure_ascii=False, indent=2)
+    return system, user
+```
+
+(e) `_core_naming_from_dict` (L245-253) — parse it:
+
+```python
+    return CoreNaming(
+        cell_type=cell_type,
+        confidence=float(data.get('confidence', 0.0) or 0.0),
+        rationale=str(data.get('rationale', '')),
+        markers_used=used,
+        alternatives=[str(a) for a in (data.get('alternatives') or [])],
+        source='llm',
+        model=model,
+        differs_from_original=bool(data.get('differs_from_original', False)),
+    )
+```
+
+(f) `run_naming_stage` rows (L485-493) — add the two fields (computed from `parent` + the JSON):
+
+```python
+        rows.append({
+            'parent_cluster': str(parent),
+            'core_subcluster': f"c{parent}_0",
+            'cell_type': data.get('cell_type'),
+            'confidence': data.get('confidence'),
+            'rationale': data.get('rationale'),
+            'source': data.get('source'),
+            'model': data.get('model'),
+            'original_label': str(parent),
+            'differs_from_original': bool(data.get('differs_from_original', False)),
+        })
+```
+
+(g) `CORE_NAME_COLS` (L381-382) — add the two columns:
+
+```python
+CORE_NAME_COLS = ['parent_cluster', 'core_subcluster', 'cell_type', 'confidence',
+                  'rationale', 'source', 'model', 'original_label',
+                  'differs_from_original']
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `cd /scratch/users/chensj16/projects/standissect && python -m pytest tests/test_annotate.py -q`
+Expected: PASS (existing + 3 new).
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /scratch/users/chensj16/projects/standissect
+git add annotate.py tests/test_annotate.py
+git commit -m "feat(annotate): naming differs_from_original + original_label (naming v2)"
+```
+
+---
+
+### Task 7: proposed_cell_types.tsv aggregation + report section
+
+**Files:**
+- Modify: `pipeline.py` (`_Layout` add `proposed_cell_types`; add `_write_proposed_cell_types` near `_write_cell_dispositions`; call after naming stage ~L917)
+- Modify: `report.py` (`build_report` sidebar + insert; add `_proposed_types_section`)
+- Test: `tests/test_discard_outputs.py` (extend), `tests/test_report.py` (extend)
+
+**Interfaces — Consumes:** `panel.tsv` with `proposed_cell_type` (Tasks 2,4); `core_names.tsv` with `differs_from_original` (Task 6). **Produces:** `_Layout.proposed_cell_types`; `_write_proposed_cell_types(lay, panel, core_names_df) -> None`; `_PROPOSED_COLS`; `_proposed_types_section(root) -> str`; `<h2 id="proposed">` + anchor.
+
+- [ ] **Step 1: Write the failing tests** — append to `tests/test_discard_outputs.py`:
+
+```python
+from standissect.pipeline import _write_proposed_cell_types, _PROPOSED_COLS  # noqa: E402
+
+
+def test_proposed_cell_types_collects_minor_and_major(tmp_path):
+    lay = _Layout(tmp_path, 'leiden')
+    lay.root.mkdir(parents=True)
+    panel = pd.DataFrame({
+        'parent_cluster': ['myeloid', 'myeloid'],
+        'subcluster': ['cmyeloid_1', 'cmyeloid_2'],
+        'proposed_cell_type': ['pDC', None],
+        'diagnosis_confidence': [0.8, 0.4],
+        'diagnosis_rationale': ['pDC markers', 'n/a'],
+    })
+    core = pd.DataFrame({
+        'parent_cluster': ['myeloid', 'tcell'],
+        'core_subcluster': ['cmyeloid_0', 'ctcell_0'],
+        'cell_type': ['cDC1', 'T cell'],
+        'confidence': [0.9, 0.95], 'rationale': ['cDC1 markers', 'CD3'],
+        'original_label': ['myeloid', 'tcell'],
+        'differs_from_original': [True, False],
+    })
+    _write_proposed_cell_types(lay, panel, core)
+    out = pd.read_csv(lay.proposed_cell_types, sep='\t')
+    assert list(out.columns) == _PROPOSED_COLS
+    assert set(out['level']) == {'minor', 'major'}
+    assert set(out['proposed_cell_type']) == {'pDC', 'cDC1'}    # 'cycling None' & non-differing excluded
+
+
+def test_proposed_cell_types_empty_header_only(tmp_path):
+    lay = _Layout(tmp_path, 'leiden')
+    lay.root.mkdir(parents=True)
+    panel = pd.DataFrame({'parent_cluster': ['0'], 'subcluster': ['c0_1'],
+                          'proposed_cell_type': [None]})
+    core = pd.DataFrame({'parent_cluster': ['0'], 'core_subcluster': ['c0_0'],
+                         'cell_type': ['T cell'], 'differs_from_original': [False]})
+    _write_proposed_cell_types(lay, panel, core)
+    out = pd.read_csv(lay.proposed_cell_types, sep='\t')
+    assert len(out) == 0 and list(out.columns) == _PROPOSED_COLS
+```
+
+Append to `tests/test_report.py`:
+
+```python
+def test_report_has_proposed_types_section(tmp_path):
+    root = tmp_path / "out" / "leiden"
+    (root / "clusters" / "c0").mkdir(parents=True)
+    pd.DataFrame({"parent_cluster": ["c0_1"], "subcluster": ["c0_1"]}
+                 ).to_csv(root / "clusters" / "c0" / "panel.tsv", sep="\t", index=False)
+    pd.DataFrame({"level": ["minor"], "parent_cluster": ["myeloid"],
+                  "subcluster": ["cmyeloid_1"], "proposed_cell_type": ["pDC"],
+                  "confidence": [0.8], "rationale": ["pDC markers"]}
+                 ).to_csv(root / "proposed_cell_types.tsv", sep="\t", index=False)
+    out = report.build_report(str(root))
+    html = pathlib.Path(out).read_text(encoding="utf-8")
+    assert 'id="proposed"' in html
+    assert 'href="#proposed"' in html
+    assert "pDC" in html
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cd /scratch/users/chensj16/projects/standissect && python -m pytest tests/test_discard_outputs.py tests/test_report.py -q`
+Expected: FAIL — `cannot import name '_write_proposed_cell_types'` / `id="proposed"` not found.
+
+- [ ] **Step 3: Implement**
+
+(a) `pipeline.py` — add `proposed_cell_types` to `_Layout` (after `discard_cells`):
+
+```python
+    @property
+    def proposed_cell_types(self): return self.root / 'proposed_cell_types.tsv'
+```
+
+(b) `pipeline.py` — add the helper next to `_write_cell_dispositions`:
+
+```python
+_PROPOSED_COLS = ['level', 'parent_cluster', 'subcluster', 'proposed_cell_type',
+                  'confidence', 'rationale']
+
+
+def _write_proposed_cell_types(lay, panel, core_names_df):
+    """Collect LLM-proposed cell types: minor (panel.proposed_cell_type) +
+    major (core_names.differs_from_original) into proposed_cell_types.tsv."""
+    rows = []
+    if len(panel) and 'proposed_cell_type' in panel.columns:
+        m = panel[panel['proposed_cell_type'].notna()
+                  & (panel['proposed_cell_type'].astype(str).str.strip() != '')
+                  & (panel['proposed_cell_type'].astype(str).str.lower() != 'nan')]
+        for _, r in m.iterrows():
+            rows.append({
+                'level': 'minor',
+                'parent_cluster': r.get('parent_cluster'),
+                'subcluster': r.get('subcluster'),
+                'proposed_cell_type': r.get('proposed_cell_type'),
+                'confidence': r.get('diagnosis_confidence'),
+                'rationale': r.get('diagnosis_rationale'),
+            })
+    if len(core_names_df) and 'differs_from_original' in core_names_df.columns:
+        d = core_names_df[core_names_df['differs_from_original'].apply(
+            lambda v: str(v).strip().lower() in ('true', '1'))]
+        for _, r in d.iterrows():
+            rows.append({
+                'level': 'major',
+                'parent_cluster': r.get('parent_cluster'),
+                'subcluster': r.get('core_subcluster'),
+                'proposed_cell_type': r.get('cell_type'),
+                'confidence': r.get('confidence'),
+                'rationale': r.get('rationale'),
+            })
+    pd.DataFrame(rows, columns=_PROPOSED_COLS).to_csv(
+        lay.proposed_cell_types, sep='\t', index=False)
+```
+
+(c) `pipeline.py` — call it after the naming stage, where `core_names_df` is read (after L917):
+
+```python
+    core_names_df = _read_tsv(lay.core_names)
+    _write_proposed_cell_types(lay, panel, core_names_df)
+```
+
+(d) `report.py` — add `_proposed_types_section` (after `_discards_section`):
+
+```python
+def _proposed_types_section(root):
+    """The 'Proposed new / re-labeled cell types' section."""
+    root = Path(root)
+    df = _read_tsv_safe(root / 'proposed_cell_types.tsv')
+    h = ['<h2 id="proposed">Proposed new / re-labeled cell types</h2>']
+    if not len(df):
+        h.append('<p class="muted">No proposed new or re-labeled cell types.</p>')
+        return '\n'.join(h)
+    h.append(f'<p><b>{len(df)}</b> proposed.</p>')
+    h.append(df.to_html(index=False, border=0, classes='deg',
+                        float_format=lambda x: f'{x:.3g}'))
+    return '\n'.join(h)
+```
+
+(e) `report.py` — sidebar anchor (after the `#discards` anchor added in Task 5):
+
+```python
+    h.append('<a href="#discards">Recommended discards</a>')
+    h.append('<a href="#proposed">Proposed new / re-labeled cell types</a>')
+```
+
+(f) `report.py` — append the section (after the `_discards_section` append from Task 5):
+
+```python
+    h.append(_discards_section(root))
+    h.append(_proposed_types_section(root))
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `cd /scratch/users/chensj16/projects/standissect && python -m pytest tests/test_discard_outputs.py tests/test_report.py -q`
+Expected: PASS (Task 4/5 tests + 3 new).
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /scratch/users/chensj16/projects/standissect
+git add pipeline.py report.py tests/test_discard_outputs.py tests/test_report.py
+git commit -m "feat: proposed_cell_types.tsv aggregation + report section"
+```
+
+---
+
+### Task 8: Full-suite + Marrow e2e
+
+**Files:** No source changes (verification only). Reuses the preprocessed Marrow h5ad from the concurrency e2e.
+
+- [ ] **Step 1: Full unit suite**
 
 Run: `cd /scratch/users/chensj16/projects/standissect && python -m pytest tests/ -q`
-Expected: PASS — all prior tests (49) plus the new disposition/discard/report/cli tests, ~60+ total. No failures.
+Expected: PASS — all prior tests (49) + the new disposition/discard/report/cli/annotate tests (~75 total). No failures.
 
 - [ ] **Step 2: Marrow e2e (LOCAL — NO srun/sbatch)**
 
-Use the preprocessed Marrow file from the concurrency e2e (`/scratch/users/chensj16/standissect_test/...` — locate the `*_pp.h5ad` with `X_umap` + QC cols; if absent, re-run `preprocess_marrow.py`). With `ARK_API_KEY` exported, run a small dissect into a fresh output dir, e.g.:
+Locate the preprocessed Marrow file (`*_pp.h5ad` with `X_umap` + QC cols) under `/scratch/users/chensj16/standissect_test/`; if absent, re-run `preprocess_marrow.py`. With `ARK_API_KEY` exported:
 
 ```bash
 cd /scratch/users/chensj16/projects/standissect
@@ -956,24 +1297,23 @@ ARK_API_KEY=$ARK_API_KEY python -m standissect run <marrow_pp.h5ad> \
   --umi-count-col total_counts
 ```
 
-- [ ] **Step 3: Verify e2e outputs**
-
-Confirm under `<output>/cell_ontology_class/`:
-- `panel.tsv` contains the 4 disposition columns; `recommended_disposition` ∈ {DISCARD, KEEP, UNCERTAIN}.
-- `cell_labels.tsv` has a `recommended_disposition` column.
-- `discard_cells.tsv` exists; every row's cluster has `recommended_disposition == DISCARD`; columns match `_DISCARD_CELL_COLS`.
-- `params.json` has `discard_confidence_threshold` and `diagnosis_prompt_version == 'standissect-diagnosis-v2'`.
-- `report.html` contains `id="discards"`.
+- [ ] **Step 3: Verify e2e outputs** under `<output>/cell_ontology_class/`:
+- `panel.tsv` has the 5 new columns; `recommended_disposition` ∈ {DISCARD, KEEP, UNCERTAIN}.
+- `cell_labels.tsv` has `recommended_disposition`.
+- `discard_cells.tsv`: columns == `_DISCARD_CELL_COLS`; every row is a DISCARD cluster's cell; `input_row_index` values are valid 0-based positions; `barcode` values are real `obs_names`.
+- `proposed_cell_types.tsv` exists (header at least); any minor rows have `level=='minor'`, major rows `level=='major'`.
+- `params.json` has `discard_confidence_threshold`, `diagnosis_prompt_version == 'standissect-diagnosis-v2'`, and naming prompt version recorded.
+- `report.html` contains `id="discards"` and `id="proposed"`.
 - **Invariant spot-check:** no cell whose cluster `likely_cause` ∈ {cell-cycle, sex-driven, interferon-response, biology-candidate} appears in `discard_cells.tsv`.
 
-- [ ] **Step 4: Commit a short e2e note** (optional, to the ledger or a NOTES file — no source change). If nothing to commit, skip.
+- [ ] **Step 4:** Optional short e2e note to the ledger; no source change → skip commit if nothing changed.
 
 ---
 
 ## Self-Review (completed)
 
-**1. Spec coverage:** D1 three-tier → Tasks 1,4,5. D2 11-cause taxonomy → Task 1 (`ALLOWED_CAUSES`) + Task 2 (prompt signatures). D3 hybrid + conservative-only + gate → Task 1 (`derive_disposition`) + Task 2 (engine/LLM wiring). D4 function-based cross-species prompt → Task 2 (`CAUSE_SIGNATURES`, `DISPOSITION_POLICY`). Outputs (panel/cell_labels/discard_cells) → Tasks 3,4. Report → Task 5. CLI + params → Task 3. `DISPOSITION_MAP` coverage test → Task 1. e2e → Task 6. No gaps.
+**1. Spec coverage:** D1 three-tier → T1,4,5. D2 11-cause → T1 (`ALLOWED_CAUSES`) + T2 (signatures). D3 conservative-only + gate → T1 (`derive_disposition`) + T2 (engines). D4 prompt → T2. **D5 proposed types** → minor (T1 field, T2 schema/parse, T4 panel col, T7 aggregation) + major (T6 naming) + T7 (`proposed_cell_types.tsv` + report). **D6 cell-precise discard** → T4 (`barcode` + `input_row_index` from `obs_names`). Outputs → T3,4,7. Report → T5,7. CLI/params → T3. e2e → T8. No gaps.
 
-**2. Placeholder scan:** No TBD/TODO; every code/test step carries complete code. The only `<...>` are the Marrow file path / API key in Task 6 (runtime values, not code).
+**2. Placeholder scan:** No TBD/TODO; every code/test step carries complete code. The only `<...>` are the Marrow path / API key in T8 (runtime values).
 
-**3. Type consistency:** `derive_disposition` returns `(recommended, baseline, overridden, reason)` — consumed identically in `finalize_disposition` (Task 1) and not re-shaped elsewhere. `recommended_disposition`/`disposition_baseline`/`disposition_overridden`/`disposition_reason` names are identical across `DiagnosisResult`, `to_panel_fields`, `_PANEL_COLS`/`_DIAGNOSIS_COLS`, `_write_cell_dispositions`, and `_discards_section`. `discard_confidence_threshold` is spelled identically across `derive_disposition`(`threshold`)/engines/`make_diagnosis_engine`/`run_dissect_pipeline`/CLI. `_Layout.discard_cells` and `_DISCARD_CELL_COLS` match the Task 4 test and Task 6 checks.
+**3. Type consistency:** `derive_disposition` → `(recommended, baseline, overridden, reason)` consumed identically in `finalize_disposition`. Names identical across files: `recommended_disposition`/`disposition_baseline`/`disposition_overridden`/`disposition_reason`/`proposed_cell_type` (`DiagnosisResult`, `to_panel_fields`, `_PANEL_COLS`/`_DIAGNOSIS_COLS`, `_write_cell_dispositions`, `_write_proposed_cell_types`, `_discards_section`); `discard_confidence_threshold` (`derive_disposition` param `threshold`, engines, `make_diagnosis_engine`, `run_dissect_pipeline`, CLI); `differs_from_original`/`original_label` (`CoreNaming`, `to_core_name_row`, `_core_naming_from_dict`, `run_naming_stage`, `CORE_NAME_COLS`, `_write_proposed_cell_types`); `_Layout.discard_cells`/`_Layout.proposed_cell_types`; `_DISCARD_CELL_COLS`/`_PROPOSED_COLS` match their tests + T8 checks. `_write_cell_dispositions(lay, panel, obs_names)` called with `adata.obs_names`.
