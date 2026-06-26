@@ -619,7 +619,7 @@ def run_dissect_pipeline(
     top_n_deg=50,
     top_n_canonical=50,
     deg_layer=None,
-    diagnosis_mode='rule',
+    diagnosis_mode='llm',
     diagnosis_llm_client=None,
     diagnosis_ark_model=DEFAULT_ARK_MODEL,
     diagnosis_ark_endpoint=DEFAULT_ARK_ENDPOINT,
