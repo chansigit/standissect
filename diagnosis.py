@@ -79,7 +79,7 @@ def derive_disposition(likely_cause, confidence, *, threshold,
                            f"{confidence:.2f} < {threshold:.2f})")
     return final, baseline, (final != baseline), reason
 
-PROMPT_VERSION = 'standissect-diagnosis-v1'
+PROMPT_VERSION = 'standissect-diagnosis-v2'
 DEFAULT_ARK_ENDPOINT = 'https://ark.cn-beijing.volces.com/api/v3/chat/completions'
 DEFAULT_ARK_MODEL = 'ep-20260412124039-zjq7v'
 DEFAULT_DIAGNOSIS_ROLES = {
@@ -341,8 +341,9 @@ class RuleDiagnosisEngine:
     mode = 'rule'
     model = None
 
-    def __init__(self, diagnosis_roles=None):
+    def __init__(self, diagnosis_roles=None, *, discard_confidence_threshold=0.5):
         self.roles = normalize_diagnosis_roles(diagnosis_roles)
+        self.discard_confidence_threshold = discard_confidence_threshold
 
     def diagnose(self, evidence: MinorEvidence) -> DiagnosisResult:
         top_source = self._top_source_enrichment(evidence)
@@ -406,7 +407,7 @@ class RuleDiagnosisEngine:
             confidence = 0.65
             used.append('significant DEG count')
 
-        return DiagnosisResult(
+        result = DiagnosisResult(
             likely_cause=cause,
             cause_detail=detail,
             confidence=confidence,
@@ -417,6 +418,8 @@ class RuleDiagnosisEngine:
             diagnosis_source='rule',
             diagnosis_mode='rule',
         )
+        result.finalize_disposition(self.discard_confidence_threshold)
+        return result
 
     def _top_source_enrichment(self, evidence: MinorEvidence) -> dict | None:
         source_cols = set(self.roles.get('source_cols') or ())
@@ -517,12 +520,16 @@ class LLMDiagnosisEngine:
     mode = 'llm'
 
     def __init__(self, client, *, mode='llm', fallback_to_rule=True,
-                 diagnosis_roles=None, llm_retries=3):
+                 diagnosis_roles=None, llm_retries=3,
+                 discard_confidence_threshold=0.5):
         self.client = client
         self.mode = mode
         self.fallback_to_rule = fallback_to_rule
         self.diagnosis_roles = normalize_diagnosis_roles(diagnosis_roles)
-        self.rule_engine = RuleDiagnosisEngine(self.diagnosis_roles)
+        self.discard_confidence_threshold = discard_confidence_threshold
+        self.rule_engine = RuleDiagnosisEngine(
+            self.diagnosis_roles,
+            discard_confidence_threshold=discard_confidence_threshold)
         self.model = getattr(client, 'model', None)
         self.llm_retries = llm_retries
 
@@ -538,7 +545,8 @@ class LLMDiagnosisEngine:
                     self.client, system_prompt, user_prompt,
                     lambda data: _diagnosis_from_dict(
                         data, rule_baseline=evidence.rule_baseline,
-                        mode=self.mode, model=self.model)),
+                        mode=self.mode, model=self.model,
+                        threshold=self.discard_confidence_threshold)),
                 retries=self.llm_retries, backoff=0.5, jitter=0.25,
                 exceptions=(Exception,))
         except Exception as e:
@@ -555,6 +563,34 @@ class LLMDiagnosisEngine:
             return fallback
 
 
+CAUSE_SIGNATURES = {
+    'sample-driven': 'fragment enriched for one sample/batch/donor (composition enrichment).',
+    'doublet-driven': 'doublet score / UMI elevated; two distinct lineages co-expressed WITH high-UMI or doublet-score signal.',
+    'low-quality (high mt)': 'elevated mitochondrial fraction (dying/broken cells).',
+    'shallow-depth': 'low UMI/gene counts dominate the split.',
+    'dissociation-effect': 'tissue-dissociation stress: immediate-early genes (AP-1: FOS/FOSB/JUN/JUNB/JUND, EGR1) and heat-shock proteins (HSPA1A/B, HSPB1, DNAJB1), SOCS3/ZFP36. Recognize species-appropriate orthologs (e.g. mouse Fos vs human FOS).',
+    'cell-cycle': 'proliferation/cell-cycle genes (MKI67, TOP2A, CCNB1/2, CDK1, PCNA, CENPF, UBE2C, histones); real cells split by cycle phase.',
+    'ambient-contamination': 'contaminant transcripts not native to the cluster: hemoglobin (HBA/HBB) from RBC ambient, OR a DIFFERENT compartment\'s markers (epithelial EPCAM/keratins or stromal COL1A1/PDGFRB in an immune cluster) appearing diffusely WITHOUT doublet/UMI signal.',
+    'sex-driven': 'sex-linked genes: XIST (female); Y genes (RPS4Y1/DDX3Y/UTY/EIF1AY; mouse Ddx3y/Uty/Eif2s3y/Kdm5d).',
+    'interferon-response': 'interferon-stimulated genes: ISG15, IFIT1/2/3, MX1/2, OAS family, STAT1, IRF7, RSAD2, IFITM3.',
+    'biology-candidate': 'many significant DEGs forming a coherent cell-type/state program without an artifact signature.',
+    'unclear': 'no signature meets confidence.',
+}
+
+DISPOSITION_POLICY = (
+    "Each likely_cause has a default recommended_disposition: "
+    "doublet-driven/low-quality (high mt)/shallow-depth/dissociation-effect/"
+    "ambient-contamination -> DISCARD; cell-cycle/sex-driven/interferon-response/"
+    "biology-candidate -> KEEP; sample-driven/unclear -> UNCERTAIN. You MAY relax "
+    "recommended_disposition toward KEEP (DISCARD->UNCERTAIN->KEEP) when evidence "
+    "supports keeping the cells, and MUST give disposition_reason. You may NOT "
+    "escalate toward DISCARD via recommended_disposition; to mark a cluster as "
+    "junk, pick a discard-type likely_cause instead. If the fragment is a real, "
+    "distinct or finer cell type than its parent (parent_cluster), set "
+    "proposed_cell_type to that cell-type name; otherwise null."
+)
+
+
 def build_llm_prompt(evidence: MinorEvidence, *, mode='hybrid') -> tuple[str, str]:
     schema = {
         'likely_cause': list(ALLOWED_CAUSES),
@@ -565,28 +601,35 @@ def build_llm_prompt(evidence: MinorEvidence, *, mode='hybrid') -> tuple[str, st
         'alternative_causes': ['plausible alternatives'],
         'recommended_checks': ['specific follow-up checks'],
         'llm_overrode_rule': 'boolean',
+        'recommended_disposition': ['DISCARD', 'KEEP', 'UNCERTAIN'],
+        'disposition_reason': 'short phrase justifying the disposition',
+        'proposed_cell_type': 'specific cell-type name if a real distinct/finer type than parent, else null',
     }
     system = (
         "You diagnose minor fragments inside single-cell clusters. "
         "Use only the supplied statistical evidence. Do not invent measurements, "
         "cell types, markers, or experiments. Choose exactly one likely_cause "
-        "from the allowed enum. Return strict JSON only."
+        "from the allowed enum, matching species-appropriate gene orthologs. "
+        "Set recommended_disposition per disposition_policy: relax toward KEEP "
+        "but NEVER escalate toward DISCARD. Return strict JSON only."
     )
     user = json.dumps({
         'task': 'diagnose_one_minor_fragment',
         'diagnosis_mode': mode,
         'allowed_likely_cause': list(ALLOWED_CAUSES),
+        'cause_signatures': CAUSE_SIGNATURES,
+        'disposition_policy': DISPOSITION_POLICY,
         'output_schema': schema,
         'evidence': evidence.to_dict(),
     }, ensure_ascii=False, indent=2)
     return system, user
 
 
-def _diagnosis_from_dict(data, *, rule_baseline, mode, model) -> DiagnosisResult:
+def _diagnosis_from_dict(data, *, rule_baseline, mode, model, threshold=0.5) -> DiagnosisResult:
     cause = data.get('likely_cause')
     if cause not in ALLOWED_CAUSES:
         raise ValueError(f"LLM likely_cause {cause!r} is not allowed")
-    return DiagnosisResult(
+    result = DiagnosisResult(
         likely_cause=cause,
         cause_detail=data.get('cause_detail'),
         confidence=float(data.get('confidence', 0.0)),
@@ -603,6 +646,13 @@ def _diagnosis_from_dict(data, *, rule_baseline, mode, model) -> DiagnosisResult
         diagnosis_mode=mode,
         model=model,
     )
+    result.finalize_disposition(
+        threshold,
+        llm_disposition=data.get('recommended_disposition'),
+        llm_reason=data.get('disposition_reason'))
+    pct = data.get('proposed_cell_type')
+    result.proposed_cell_type = str(pct).strip() if pct and str(pct).strip() else None
+    return result
 
 
 def parse_llm_result(raw, *, rule_baseline, mode, model) -> DiagnosisResult:
@@ -654,6 +704,7 @@ def make_diagnosis_engine(
     fallback_to_rule: bool = True,
     diagnosis_roles=None,
     llm_retries: int = 3,
+    discard_confidence_threshold: float = 0.5,
 ):
     """Create the requested diagnosis engine.
 
@@ -666,7 +717,9 @@ def make_diagnosis_engine(
     if mode not in {'rule', 'llm', 'hybrid'}:
         raise ValueError("diagnosis_mode must be 'rule', 'llm', or 'hybrid'")
     if mode == 'rule':
-        return RuleDiagnosisEngine(diagnosis_roles)
+        return RuleDiagnosisEngine(
+            diagnosis_roles,
+            discard_confidence_threshold=discard_confidence_threshold)
     client = make_chat_client(
         mode=mode, llm_client=llm_client, ark_api_key=ark_api_key,
         ark_api_key_env=ark_api_key_env, ark_model=ark_model,
@@ -678,7 +731,8 @@ def make_diagnosis_engine(
         )
     return LLMDiagnosisEngine(
         client, mode=mode, fallback_to_rule=fallback_to_rule,
-        diagnosis_roles=diagnosis_roles, llm_retries=llm_retries)
+        diagnosis_roles=diagnosis_roles, llm_retries=llm_retries,
+        discard_confidence_threshold=discard_confidence_threshold)
 
 
 def safe_subcluster_name(name: str) -> str:
