@@ -192,6 +192,7 @@ def _write_cell_dispositions(lay, panel, obs_names):
     labels['recommended_disposition'] = col('recommended_disposition').fillna('')
     labels.to_csv(lay.cell_labels, sep='\t')
 
+    # input_row_index assumes unique obs_names; last-wins on duplicates.
     pos = {str(b): i for i, b in enumerate(obs_names)}
     mask = (labels['recommended_disposition'] == 'DISCARD').values
     bc = labels.index[mask]
@@ -207,6 +208,24 @@ def _write_cell_dispositions(lay, panel, obs_names):
     discard.to_csv(lay.discard_cells, sep='\t', index=False)
 
 
+def _apply_discard(adata, panel, path):
+    """Write a cleaned .h5ad with DISCARD cells removed (KEEP + UNCERTAIN kept).
+    Cleaned obs gains recommended_disposition for provenance. Does not mutate adata."""
+    disp_map = {}
+    if len(panel) and 'subcluster' in panel.columns and 'recommended_disposition' in panel.columns:
+        p = panel.drop_duplicates('subcluster')
+        disp_map = dict(zip(p['subcluster'].astype(str), p['recommended_disposition'].astype(str)))
+    per_cell = adata.obs['original_cluster_split'].astype(str).map(disp_map).fillna('')
+    keep_mask = (per_cell != 'DISCARD').values
+    cleaned = adata[keep_mask].copy()
+    cleaned.obs['recommended_disposition'] = per_cell.values[keep_mask]
+    written = _write_h5ad_atomic(cleaned, path)
+    n_disc = int((~keep_mask).sum())
+    print(f"[pipeline] apply-discard: removed {n_disc} DISCARD cells; "
+          f"wrote {int(cleaned.n_obs)} kept cells to {written}", flush=True)
+    return n_disc, int(cleaned.n_obs)
+
+
 _PROPOSED_COLS = ['level', 'parent_cluster', 'subcluster', 'proposed_cell_type',
                   'confidence', 'rationale']
 
@@ -216,6 +235,7 @@ def _write_proposed_cell_types(lay, panel, core_names_df):
     major (core_names.differs_from_original) into proposed_cell_types.tsv."""
     rows = []
     if len(panel) and 'proposed_cell_type' in panel.columns:
+        # The str.lower() != 'nan' filter intentionally excludes the literal string 'nan'.
         m = panel[panel['proposed_cell_type'].notna()
                   & (panel['proposed_cell_type'].astype(str).str.strip() != '')
                   & (panel['proposed_cell_type'].astype(str).str.lower() != 'nan')]
@@ -719,6 +739,7 @@ def run_dissect_pipeline(
     cluster_col,
     output_dir,
     labeled_h5ad_path=None,
+    apply_discard_path=None,
     umap_key='X_umap',
     cat_cols=None,
     qc_cols=None,
@@ -970,6 +991,8 @@ def run_dissect_pipeline(
     diag_cols = [c for c in _DIAGNOSIS_COLS if c in panel.columns]
     panel[diag_cols].to_csv(lay.diagnosis_all, sep='\t', index=False)
     _write_cell_dispositions(lay, panel, adata.obs_names)
+    if apply_discard_path is not None:
+        _apply_discard(adata, panel, apply_discard_path)
     qc_all = _concat_tsvs(lay.clusters.glob('c*/qc_drift_*.tsv'))
     if len(qc_all):
         qc_all.to_csv(lay.qc_drift_all, sep='\t', index=False)
@@ -1081,6 +1104,7 @@ def run_dissect_pipeline(
         'llm_retries': llm_retries,
         'diagnosis_timeout': diagnosis_timeout,
         'discard_confidence_threshold': discard_confidence_threshold,
+        'apply_discard_path': apply_discard_path,
         'partition_info': partition_info,
     }, default=str, indent=2))
 

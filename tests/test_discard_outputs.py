@@ -116,3 +116,22 @@ def test_proposed_major_excludes_null_cell_type(tmp_path):
     _write_proposed_cell_types(lay, panel, core)
     out = pd.read_csv(lay.proposed_cell_types, sep='\t')
     assert list(out['proposed_cell_type']) == ['cDC1']
+
+
+def test_apply_discard_removes_discard_cells(tmp_path):
+    import anndata as ad
+    import numpy as np
+    from standissect.pipeline import _apply_discard
+    a = ad.AnnData(X=np.zeros((4, 2), dtype='float32'),
+                   obs=pd.DataFrame({'original_cluster_split': ['c0_1', 'c0_2', 'c1_1', 'c0_1']},
+                                    index=['A', 'B', 'C', 'D']))
+    panel = pd.DataFrame({'subcluster': ['c0_1', 'c0_2', 'c1_1'],
+                          'recommended_disposition': ['DISCARD', 'KEEP', 'UNCERTAIN']})
+    out = tmp_path / 'cleaned.h5ad'
+    n_disc, n_kept = _apply_discard(a, panel, str(out))
+    assert (n_disc, n_kept) == (2, 2)
+    cleaned = ad.read_h5ad(out)
+    assert sorted(cleaned.obs_names) == ['B', 'C']               # A,D were c0_1 = DISCARD
+    assert 'recommended_disposition' in cleaned.obs.columns
+    assert set(cleaned.obs['recommended_disposition']) == {'KEEP', 'UNCERTAIN'}
+    assert a.n_obs == 4                                          # original not mutated

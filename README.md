@@ -20,6 +20,7 @@ from scratch; it cleans up and explains a clustering you already have.
 [How it works](#how-it-works) ·
 [Pipeline](#pipeline--end-to-end) ·
 [Diagnoses](#diagnoses-likely_cause) ·
+[Dispositions](#recommended-discards--dispositions) ·
 [Re-running](#re-running) ·
 [Output](#output-tree) ·
 [Modules](#modules)
@@ -189,6 +190,59 @@ fire for columns named exactly `orig.ident`, `hybrid_score`, `percent.mt`, and
 `nFeature_RNA`. Rename your `obs` columns to match (or pass them under these
 names); otherwise even a clear artifact only ever reaches `biology-candidate` or
 `unclear`.
+
+## Recommended discards & dispositions
+
+After diagnosis every minor gets a `recommended_disposition` (written to
+`panel.tsv`, `diagnosis_all.tsv`, and `cell_labels.tsv`):
+
+| value | meaning |
+|---|---|
+| `DISCARD` | strong evidence of a technical artifact; cells are candidates for removal |
+| `UNCERTAIN` | ambiguous — kept by default but flagged for manual review |
+| `KEEP` | genuine biology or too weak a signal to act on |
+
+**Conservative-only rule.** Automation never moves toward DISCARD compared with
+the cause baseline. An LLM override is accepted only if it is at least as
+keep-leaning as the rule baseline; a DISCARD call below `--discard-confidence-threshold`
+(default 0.5) is automatically downgraded to UNCERTAIN.
+
+### `likely_cause` → baseline disposition
+
+| `likely_cause` | baseline | rationale |
+|---|---|---|
+| `doublet-driven` | DISCARD | doublets are artefacts |
+| `low-quality (high mt)` | DISCARD | dying/stressed cells |
+| `shallow-depth` | DISCARD | under-sequenced |
+| `dissociation-effect` | DISCARD | transcriptional noise from dissociation |
+| `ambient-contamination` | DISCARD | background RNA contamination |
+| `sample-driven` | UNCERTAIN | may be biology; review per-sample |
+| `unclear` | UNCERTAIN | insufficient signal to call |
+| `cell-cycle` | KEEP | known biology |
+| `sex-driven` | KEEP | known biology |
+| `interferon-response` | KEEP | known biology |
+| `biology-candidate` | KEEP | distinct DEG profile, likely real |
+
+### New outputs
+
+| file | description |
+|---|---|
+| `panel.tsv` | gains `disposition_baseline`, `recommended_disposition`, `disposition_overridden`, `disposition_reason`, `proposed_cell_type` columns |
+| `diagnosis_all.tsv` | same disposition columns, diagnosis-focused subset |
+| `discard_cells.tsv` | one row per DISCARD cell — `barcode` (obs_name, the stable cross-version key) + `input_row_index` (0-based row position in the input adata) + subcluster/cause/confidence/reason |
+| `proposed_cell_types.tsv` | LLM-proposed cell-type relabels — `minor` (per-subcluster `proposed_cell_type`) and `major` (`differs_from_original` core renames) |
+
+The HTML report gains a **Recommended discards** section (DISCARD table + collapsible UNCERTAIN list) and a **Proposed cell types** section.
+
+### CLI flags
+
+`--discard-confidence-threshold FLOAT` (default `0.5`) — DISCARD calls below this
+confidence are downgraded to UNCERTAIN.
+
+`--apply-discard PATH` — after the pipeline finishes, write a cleaned `.h5ad` to
+exactly `PATH` with all `recommended_disposition==DISCARD` cells removed. KEEP and
+UNCERTAIN cells are retained. The cleaned `obs` gains a `recommended_disposition`
+column for provenance. Off when omitted.
 
 ## Re-running
 

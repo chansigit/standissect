@@ -174,6 +174,14 @@ class DiagnosisResult:
                 self.disposition_reason = (
                     f"{self.likely_cause} → "
                     f"{self.disposition_baseline} (rule baseline)")
+        elif (self.recommended_disposition in _DISPOSITION_RANK
+              and _DISPOSITION_RANK[self.recommended_disposition]
+                  < _DISPOSITION_RANK[self.disposition_baseline]):
+            # conservative-only: never accept a pre-supplied disposition more
+            # aggressive (toward DISCARD) than the cause baseline.
+            self.recommended_disposition = self.disposition_baseline
+        self.disposition_overridden = (
+            self.recommended_disposition != self.disposition_baseline)
 
     def finalize_disposition(self, threshold, *, llm_disposition=None,
                              llm_reason=None):
@@ -651,7 +659,8 @@ def _diagnosis_from_dict(data, *, rule_baseline, mode, model, threshold=0.5) -> 
         llm_disposition=data.get('recommended_disposition'),
         llm_reason=data.get('disposition_reason'))
     pct = data.get('proposed_cell_type')
-    result.proposed_cell_type = str(pct).strip() if pct and str(pct).strip() else None
+    pct = str(pct).strip() if pct else ''
+    result.proposed_cell_type = pct or None
     return result
 
 

@@ -21,6 +21,10 @@ def _add_common_run_args(parser):
                         help='Directory where standissect outputs are written.')
     parser.add_argument('--labeled-h5ad-path',
                         help='Optional output .h5ad with standissect labels.')
+    parser.add_argument('--apply-discard', metavar='PATH',
+                        help='Write a cleaned .h5ad with recommended_disposition==DISCARD '
+                             'cells removed (KEEP and UNCERTAIN are retained) to this exact '
+                             'path. Off when omitted.')
     parser.add_argument('--umap-key', default='X_umap',
                         help='Embedding key in adata.obsm. Default: X_umap.')
 
@@ -127,6 +131,7 @@ def run_cmd(args):
         cluster_col=args.cluster_col,
         output_dir=args.output_dir,
         labeled_h5ad_path=args.labeled_h5ad_path,
+        apply_discard_path=args.apply_discard,
         umap_key=args.umap_key,
         sample_col=_none_if_empty(args.sample_col),
         batch_col=_none_if_empty(args.batch_col),

@@ -11,3 +11,7 @@ dist/
 # standissect run artifacts
 results/
 *.h5ad
+
+# SDD process scratch (briefs / reports / ledger / diff packages).
+# Root-anchored so docs/superpowers/ design docs are NOT ignored.
+/.superpowers/

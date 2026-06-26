@@ -80,3 +80,9 @@ def test_finalize_applies_gate():
     assert r.recommended_disposition == 'UNCERTAIN'
     assert r.disposition_overridden is True
     assert r.proposed_cell_type is None
+
+
+def test_post_init_clamps_aggressive_preset_disposition():
+    r = DiagnosisResult(likely_cause='cell-cycle', recommended_disposition='DISCARD')
+    assert r.recommended_disposition == 'KEEP'        # clamped to baseline
+    assert r.disposition_overridden is False
