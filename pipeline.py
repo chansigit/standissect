@@ -208,19 +208,42 @@ def _write_cell_dispositions(lay, panel, obs_names):
     discard.to_csv(lay.discard_cells, sep='\t', index=False)
 
 
-def _apply_discard(adata, panel, path):
-    """Write a cleaned .h5ad with DISCARD cells removed (KEEP + UNCERTAIN kept).
-    Cleaned obs gains recommended_disposition for provenance. Does not mutate adata."""
-    disp_map = {}
+def _resolve_cell_types(adata, panel, core_names_df, cluster_col):
+    """Per-cell best-available cell type: minor proposed_cell_type -> major core
+    cell_type -> original cluster_col label. Returns a list aligned to adata.obs."""
+    def _map(df, key, val):
+        if not len(df) or key not in df.columns or val not in df.columns:
+            return {}
+        s = df[df[val].notna()
+               & (df[val].astype(str).str.strip() != '')
+               & (df[val].astype(str).str.strip().str.lower() != 'nan')]
+        return dict(zip(s[key].astype(str), s[val].astype(str)))
+    minor = _map(panel, 'subcluster', 'proposed_cell_type')
+    major = _map(core_names_df, 'parent_cluster', 'cell_type')
+    parent = adata.obs[cluster_col].astype(str).values
+    sub = (adata.obs['original_cluster_split'].astype(str).values
+           if 'original_cluster_split' in adata.obs.columns else parent)
+    return [minor.get(s) or major.get(p) or p for s, p in zip(sub, parent)]
+
+
+def _annotate_cells(adata, panel, core_names_df, cluster_col):
+    """Set adata.obs['recommended_disposition'] + adata.obs['proposed_cell_type']."""
+    dmap = {}
     if len(panel) and 'subcluster' in panel.columns and 'recommended_disposition' in panel.columns:
         p = panel.drop_duplicates('subcluster')
-        disp_map = dict(zip(p['subcluster'].astype(str), p['recommended_disposition'].astype(str)))
-    per_cell = adata.obs['original_cluster_split'].astype(str).map(disp_map).fillna('')
-    keep_mask = (per_cell != 'DISCARD').values
-    cleaned = adata[keep_mask].copy()
-    cleaned.obs['recommended_disposition'] = per_cell.values[keep_mask]
+        dmap = dict(zip(p['subcluster'].astype(str), p['recommended_disposition'].astype(str)))
+    sub = adata.obs['original_cluster_split'].astype(str)
+    adata.obs['recommended_disposition'] = sub.map(dmap).fillna('').values
+    adata.obs['proposed_cell_type'] = _resolve_cell_types(adata, panel, core_names_df, cluster_col)
+
+
+def _write_cleaned_h5ad(adata, path):
+    """Write a cleaned .h5ad with DISCARD cells removed (KEEP + UNCERTAIN kept).
+    Assumes adata.obs['recommended_disposition'] is already set."""
+    keep = (adata.obs['recommended_disposition'].astype(str).values != 'DISCARD')
+    cleaned = adata[keep].copy()
     written = _write_h5ad_atomic(cleaned, path)
-    n_disc = int((~keep_mask).sum())
+    n_disc = int((~keep).sum())
     print(f"[pipeline] apply-discard: removed {n_disc} DISCARD cells; "
           f"wrote {int(cleaned.n_obs)} kept cells to {written}", flush=True)
     return n_disc, int(cleaned.n_obs)
@@ -991,8 +1014,6 @@ def run_dissect_pipeline(
     diag_cols = [c for c in _DIAGNOSIS_COLS if c in panel.columns]
     panel[diag_cols].to_csv(lay.diagnosis_all, sep='\t', index=False)
     _write_cell_dispositions(lay, panel, adata.obs_names)
-    if apply_discard_path is not None:
-        _apply_discard(adata, panel, apply_discard_path)
     qc_all = _concat_tsvs(lay.clusters.glob('c*/qc_drift_*.tsv'))
     if len(qc_all):
         qc_all.to_csv(lay.qc_drift_all, sep='\t', index=False)
@@ -1034,6 +1055,13 @@ def run_dissect_pipeline(
         max_workers=llm_concurrency)
     core_names_df = _read_tsv(lay.core_names)
     _write_proposed_cell_types(lay, panel, core_names_df)
+    _annotate_cells(adata, panel, core_names_df, cluster_col)
+    if lay.cell_labels.exists():
+        _lab = pd.read_csv(lay.cell_labels, sep='\t', index_col=0)
+        _lab['proposed_cell_type'] = adata.obs['proposed_cell_type'].reindex(_lab.index).values
+        _lab.to_csv(lay.cell_labels, sep='\t')
+    if apply_discard_path is not None:
+        _write_cleaned_h5ad(adata, apply_discard_path)
 
     # ---- STAGE: per-cluster narrative (LLM only) ----------------------
     narrative_force = naming_force or diagnosis_force or ('narrative' in force)

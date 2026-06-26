@@ -241,8 +241,18 @@ confidence are downgraded to UNCERTAIN.
 
 `--apply-discard PATH` — after the pipeline finishes, write a cleaned `.h5ad` to
 exactly `PATH` with all `recommended_disposition==DISCARD` cells removed. KEEP and
-UNCERTAIN cells are retained. The cleaned `obs` gains a `recommended_disposition`
-column for provenance. Off when omitted.
+UNCERTAIN cells are retained. Off when omitted.
+
+After the naming stage, all three outputs carry per-cell annotation columns resolved
+via a fallback chain (minor subcluster `proposed_cell_type` → major core `cell_type`
+from `core_names.tsv` → original `cluster_col` label, so every cell always gets a
+value):
+
+| Output | New `obs` columns |
+|---|---|
+| cleaned h5ad (`--apply-discard`) | `recommended_disposition`, `proposed_cell_type` |
+| labeled h5ad (`--labeled-h5ad-path`) | `recommended_disposition`, `proposed_cell_type` |
+| `cell_labels.tsv` | `recommended_disposition` (from diagnosis), `proposed_cell_type` |
 
 ## Re-running
 

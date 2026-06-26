@@ -8,7 +8,9 @@ sys.path.insert(0, str(_PKG_PARENT))
 
 from standissect.pipeline import (_write_cell_dispositions, _Layout,  # noqa: E402
                                   _PANEL_COLS, _DIAGNOSIS_COLS,
-                                  _write_proposed_cell_types, _PROPOSED_COLS)
+                                  _write_proposed_cell_types, _PROPOSED_COLS,
+                                  _annotate_cells, _resolve_cell_types,
+                                  _write_cleaned_h5ad)
 
 
 def _panel():
@@ -118,20 +120,29 @@ def test_proposed_major_excludes_null_cell_type(tmp_path):
     assert list(out['proposed_cell_type']) == ['cDC1']
 
 
-def test_apply_discard_removes_discard_cells(tmp_path):
+def test_apply_discard_and_celltype_obs(tmp_path):
     import anndata as ad
     import numpy as np
-    from standissect.pipeline import _apply_discard
-    a = ad.AnnData(X=np.zeros((4, 2), dtype='float32'),
-                   obs=pd.DataFrame({'original_cluster_split': ['c0_1', 'c0_2', 'c1_1', 'c0_1']},
-                                    index=['A', 'B', 'C', 'D']))
-    panel = pd.DataFrame({'subcluster': ['c0_1', 'c0_2', 'c1_1'],
-                          'recommended_disposition': ['DISCARD', 'KEEP', 'UNCERTAIN']})
+    obs = pd.DataFrame({'cell_ontology_class': ['granulocyte', 'granulocyte', 'B cell', 'granulocyte'],
+                        'original_cluster_split': ['cgranulocyte_1', 'cgranulocyte_0',
+                                                   'cB cell_0', 'cgranulocyte_2']},
+                       index=['A', 'B', 'C', 'D'])
+    a = ad.AnnData(X=np.zeros((4, 2), dtype='float32'), obs=obs)
+    panel = pd.DataFrame({'subcluster': ['cgranulocyte_1', 'cgranulocyte_2'],
+                          'recommended_disposition': ['KEEP', 'DISCARD'],
+                          'proposed_cell_type': ['cycling granulocyte', None]})
+    core = pd.DataFrame({'parent_cluster': ['granulocyte', 'B cell'],
+                         'cell_type': ['neutrophil', None],
+                         'differs_from_original': [True, False]})
+    _annotate_cells(a, panel, core, 'cell_ontology_class')
+    # per-cell resolution: A=minor 'cycling granulocyte'; B=major 'neutrophil';
+    # C=major None->fallback original 'B cell'; D=minor None->major 'neutrophil'
+    assert list(a.obs['proposed_cell_type']) == ['cycling granulocyte', 'neutrophil',
+                                                 'B cell', 'neutrophil']
     out = tmp_path / 'cleaned.h5ad'
-    n_disc, n_kept = _apply_discard(a, panel, str(out))
-    assert (n_disc, n_kept) == (2, 2)
+    n_disc, n_kept = _write_cleaned_h5ad(a, str(out))
+    assert (n_disc, n_kept) == (1, 3)                       # D was DISCARD
     cleaned = ad.read_h5ad(out)
-    assert sorted(cleaned.obs_names) == ['B', 'C']               # A,D were c0_1 = DISCARD
+    assert 'D' not in list(cleaned.obs_names)
+    assert 'proposed_cell_type' in cleaned.obs.columns
     assert 'recommended_disposition' in cleaned.obs.columns
-    assert set(cleaned.obs['recommended_disposition']) == {'KEEP', 'UNCERTAIN'}
-    assert a.n_obs == 4                                          # original not mutated
