@@ -31,8 +31,16 @@ from .diagnosis import (
     MinorEvidence,
     RuleDiagnosisEngine,
     build_minor_evidence,
+    make_chat_client,
     make_diagnosis_engine,
     normalize_diagnosis_roles,
+)
+from .annotate import (
+    ClusterNarrative,
+    CoreNaming,
+    LocalNamingEngine,
+    NarrativeEngine,
+    make_naming_engine,
 )
 
 __version__ = "0.1.1"
@@ -44,8 +52,14 @@ __all__ = [
     "MinorEvidence",
     "RuleDiagnosisEngine",
     "build_minor_evidence",
+    "make_chat_client",
     "make_diagnosis_engine",
     "normalize_diagnosis_roles",
+    "ClusterNarrative",
+    "CoreNaming",
+    "LocalNamingEngine",
+    "NarrativeEngine",
+    "make_naming_engine",
     "umap_leiden_partition",
     "dissect_one_cluster",
     "canonical_marker_deg",
