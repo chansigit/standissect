@@ -31,9 +31,53 @@ ALLOWED_CAUSES = (
     'doublet-driven',
     'low-quality (high mt)',
     'shallow-depth',
+    'dissociation-effect',
+    'cell-cycle',
+    'ambient-contamination',
+    'sex-driven',
+    'interferon-response',
     'biology-candidate',
     'unclear',
 )
+
+DISPOSITION_MAP = {
+    'sample-driven': 'UNCERTAIN',
+    'doublet-driven': 'DISCARD',
+    'low-quality (high mt)': 'DISCARD',
+    'shallow-depth': 'DISCARD',
+    'dissociation-effect': 'DISCARD',
+    'cell-cycle': 'KEEP',
+    'ambient-contamination': 'DISCARD',
+    'sex-driven': 'KEEP',
+    'interferon-response': 'KEEP',
+    'biology-candidate': 'KEEP',
+    'unclear': 'UNCERTAIN',
+}
+
+_DISPOSITION_RANK = {'DISCARD': 0, 'UNCERTAIN': 1, 'KEEP': 2}
+
+
+def derive_disposition(likely_cause, confidence, *, threshold,
+                       llm_disposition=None, llm_reason=None):
+    """(recommended, baseline, overridden, reason). Conservative-only: an LLM
+    pick is accepted only if at least as keep-leaning as the baseline; a DISCARD
+    baseline below ``threshold`` confidence is downgraded to UNCERTAIN."""
+    baseline = DISPOSITION_MAP[likely_cause]
+    candidate = baseline
+    reason = f"{likely_cause} → {baseline} (rule baseline)"
+    if llm_disposition in _DISPOSITION_RANK:
+        if _DISPOSITION_RANK[llm_disposition] >= _DISPOSITION_RANK[baseline]:
+            candidate = llm_disposition
+            reason = (str(llm_reason).strip() if llm_reason else '') or reason
+        else:
+            reason = (reason + f" [LLM suggested {llm_disposition}; rejected "
+                      f"— cannot escalate toward DISCARD]")
+    final = candidate
+    if candidate == 'DISCARD' and confidence < threshold:
+        final = 'UNCERTAIN'
+        reason = reason + (f" (downgraded: low confidence "
+                           f"{confidence:.2f} < {threshold:.2f})")
+    return final, baseline, (final != baseline), reason
 
 PROMPT_VERSION = 'standissect-diagnosis-v1'
 DEFAULT_ARK_ENDPOINT = 'https://ark.cn-beijing.volces.com/api/v3/chat/completions'
@@ -105,6 +149,11 @@ class DiagnosisResult:
     recommended_checks: list[str] = field(default_factory=list)
     rule_baseline: str | None = None
     llm_overrode_rule: bool = False
+    disposition_baseline: str = ''
+    recommended_disposition: str = ''
+    disposition_overridden: bool = False
+    disposition_reason: str = ''
+    proposed_cell_type: str | None = None
     diagnosis_source: str = 'rule'
     diagnosis_mode: str = 'rule'
     model: str | None = None
@@ -118,6 +167,24 @@ class DiagnosisResult:
                 f"got {self.likely_cause!r}"
             )
         self.confidence = float(min(1.0, max(0.0, self.confidence)))
+        self.disposition_baseline = DISPOSITION_MAP[self.likely_cause]
+        if not self.recommended_disposition:
+            self.recommended_disposition = self.disposition_baseline
+            if not self.disposition_reason:
+                self.disposition_reason = (
+                    f"{self.likely_cause} → "
+                    f"{self.disposition_baseline} (rule baseline)")
+
+    def finalize_disposition(self, threshold, *, llm_disposition=None,
+                             llm_reason=None):
+        final, baseline, overridden, reason = derive_disposition(
+            self.likely_cause, self.confidence, threshold=threshold,
+            llm_disposition=llm_disposition, llm_reason=llm_reason)
+        self.disposition_baseline = baseline
+        self.recommended_disposition = final
+        self.disposition_overridden = overridden
+        self.disposition_reason = reason
+        return self
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -130,6 +197,11 @@ class DiagnosisResult:
             'diagnosis_confidence': self.confidence,
             'diagnosis_rationale': self.rationale,
             'llm_overrode_rule': self.llm_overrode_rule,
+            'disposition_baseline': self.disposition_baseline,
+            'recommended_disposition': self.recommended_disposition,
+            'disposition_overridden': self.disposition_overridden,
+            'disposition_reason': self.disposition_reason,
+            'proposed_cell_type': self.proposed_cell_type,
         }
 
 
