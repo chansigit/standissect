@@ -822,8 +822,22 @@ def run_dissect_pipeline(
         # Materialise each subset with .copy() so the spawn worker receives a
         # standalone AnnData (not a view) — a view retains a reference to the
         # full parent adata, which would be serialised in its entirety.
-        subsets = {p: adata[adata.obs[cluster_col].astype(str) == str(p)].copy()
-                   for p in todo}
+        # Cast obs/var Categorical columns to object: pandas Categorical raises
+        # NotImplementedError in NDArrayBacked.__setstate__ when unpickled in a
+        # spawn worker, which would silently force the serial fallback. The
+        # dissect/persist code reads obs via .astype(str)/.unique() and only
+        # touches var through var_names (the index) — never a .cat. accessor —
+        # so object dtype is behavior-preserving.
+        def _decat(frame):
+            for _col in frame.columns:
+                if isinstance(frame[_col].dtype, pd.CategoricalDtype):
+                    frame[_col] = frame[_col].astype(object)
+        subsets = {}
+        for p in todo:
+            subset = adata[adata.obs[cluster_col].astype(str) == str(p)].copy()
+            _decat(subset.obs)
+            _decat(subset.var)
+            subsets[p] = subset
         deg_jobs = max(1, min(len(todo), os.cpu_count() or 1, n_jobs))
         try:
             process_map(_dissect_task, [(p, subsets[p], ctx) for p in todo],
