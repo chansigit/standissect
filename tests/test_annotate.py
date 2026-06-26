@@ -60,3 +60,51 @@ def test_build_core_evidence_reads_top_up_markers(tmp_path):
     assert evi.n_cells == 123
     assert evi.hint == "synovium"
     assert evi.core_subcluster == "c0_0"
+
+
+def _raise(system, user):
+    raise RuntimeError("no network")
+
+
+def test_llm_naming_happy_and_marker_guard():
+    payload = json.dumps({
+        "cell_type": "T cell", "confidence": 0.9, "rationale": "CD3D/CD3E present",
+        "markers_used": ["CD3D", "CD3E", "HALLUCINATED"], "alternatives": ["NK cell"]})
+    eng = annotate.LLMNamingEngine(CallableChatClient(lambda s, u: payload, model="m"))
+    r = eng.name(_evi(["CD3D", "CD3E", "TRAC"]))
+    assert r.cell_type == "T cell"
+    assert r.source == "llm"
+    assert r.model == "m"
+    assert "HALLUCINATED" not in r.markers_used      # not in supplied list -> dropped
+    assert set(r.markers_used) <= {"CD3D", "CD3E", "TRAC"}
+
+
+def test_llm_naming_uncertain_to_none():
+    payload = json.dumps({"cell_type": "uncertain", "confidence": 0.1, "rationale": "ambiguous"})
+    r = annotate.LLMNamingEngine(CallableChatClient(lambda s, u: payload)).name(_evi(["CD3D"]))
+    assert r.cell_type is None
+    assert r.source == "llm"
+
+
+def test_llm_naming_falls_back_to_local():
+    eng = annotate.make_naming_engine(client=CallableChatClient(_raise, model="m"))
+    r = eng.name(_evi(["CD3D", "CD3E", "TRAC", "CD2"]))
+    assert r.source == "local"
+    assert r.cell_type == "T cell"
+    assert r.model == "m"               # engine model preserved through fallback
+    assert r.error is not None
+
+
+def test_llm_naming_no_fallback_unnamed():
+    eng = annotate.LLMNamingEngine(CallableChatClient(_raise, model="m"),
+                                   local=None, fallback_to_local=False)
+    r = eng.name(_evi(["CD3D"]))
+    assert r.cell_type is None
+    assert r.source == "unnamed"
+    assert r.error is not None
+
+
+def test_make_naming_engine_selects_local_or_llm():
+    assert isinstance(annotate.make_naming_engine(client=None), annotate.LocalNamingEngine)
+    eng = annotate.make_naming_engine(client=CallableChatClient(lambda s, u: "{}"))
+    assert isinstance(eng, annotate.LLMNamingEngine)

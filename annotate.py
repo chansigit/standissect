@@ -201,3 +201,87 @@ class LocalNamingEngine:
             rationale=(f"local marker overlap: {n} of the core top markers match "
                        f"{cell_type} ({', '.join(inter)})"),
             markers_used=inter, source='local', model=None)
+
+
+_UNCERTAIN = {'uncertain', 'unknown', 'unclear', 'ambiguous', 'na', 'n/a', 'none', 'null', ''}
+
+
+def build_core_naming_prompt(evidence: CoreEvidence) -> tuple[str, str]:
+    schema = {
+        'cell_type': 'cell type/state name, or "uncertain"',
+        'confidence': 'number from 0 to 1',
+        'rationale': 'one concise sentence citing supplied markers',
+        'markers_used': ['subset of the supplied marker genes'],
+        'alternatives': ['other plausible cell types'],
+    }
+    system = (
+        "You are a single-cell biologist. Name the most likely cell type or state "
+        "for a cluster from its ranked canonical marker genes, using established "
+        "marker-to-cell-type knowledge. If the markers are ambiguous, return "
+        '"uncertain" with low confidence. Cite only markers from the supplied '
+        "list; do not introduce markers that are not listed. Return strict JSON only."
+    )
+    user = json.dumps({
+        'task': 'name_one_canonical_core',
+        'tissue_hint': evidence.hint,
+        'output_schema': schema,
+        'evidence': evidence.to_dict(),
+    }, ensure_ascii=False, indent=2)
+    return system, user
+
+
+def _core_naming_from_dict(data, evidence: CoreEvidence, *, model) -> CoreNaming:
+    supplied = set(evidence.marker_genes())
+    raw = data.get('cell_type')
+    cell_type = str(raw).strip() if raw is not None else None
+    if cell_type is None or cell_type.lower() in _UNCERTAIN:
+        cell_type = None
+    used = [str(g) for g in (data.get('markers_used') or []) if str(g) in supplied]
+    return CoreNaming(
+        cell_type=cell_type,
+        confidence=float(data.get('confidence', 0.0) or 0.0),
+        rationale=str(data.get('rationale', '')),
+        markers_used=used,
+        alternatives=[str(a) for a in (data.get('alternatives') or [])],
+        source='llm',
+        model=model,
+    )
+
+
+class LLMNamingEngine:
+    """Primary namer over a chat client; falls back to ``local`` on failure."""
+
+    source = 'llm'
+
+    def __init__(self, client, *, local: 'LocalNamingEngine | None' = None,
+                 fallback_to_local: bool = True):
+        self.client = client
+        self.local = local
+        self.fallback_to_local = fallback_to_local
+        self.model = getattr(client, 'model', None)
+
+    def name(self, evidence: CoreEvidence) -> CoreNaming:
+        system, user = build_core_naming_prompt(evidence)
+        try:
+            return call_structured(
+                self.client, system, user,
+                lambda data: _core_naming_from_dict(data, evidence, model=self.model))
+        except Exception as e:
+            if self.local is not None and self.fallback_to_local:
+                result = self.local.name(evidence)
+                result.model = self.model
+                result.error = str(e)
+                return result
+            return CoreNaming(cell_type=None, source='unnamed',
+                              model=self.model, error=str(e))
+
+
+def make_naming_engine(*, client=None, markers=None, fallback_to_local=True):
+    """LLM primary + local backup when a client exists, else local-only.
+
+    Naming therefore always produces a result.
+    """
+    local = LocalNamingEngine(markers)
+    if client is None:
+        return local
+    return LLMNamingEngine(client, local=local, fallback_to_local=fallback_to_local)
