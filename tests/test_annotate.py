@@ -241,3 +241,44 @@ def test_naming_stage_parallel_matches_serial(tmp_path):
     annotate.run_naming_stage(clusters_dir=cb, canonical_dir=canb,
         core_names_path=b / "core_names.tsv", parents=["0", "1"], engine=eng(), max_workers=4)
     assert (a / "core_names.tsv").read_text() == (b / "core_names.tsv").read_text()
+
+
+def test_naming_prompt_advertises_differs_and_cites_parent():
+    system, user = annotate.build_core_naming_prompt(_evi(["IL3RA"], parent="myeloid"))
+    assert "differs_from_original" in user
+    assert "parent_cluster" in (system + user)
+
+
+def test_core_naming_from_dict_parses_differs_and_original_label():
+    evi = _evi(["IL3RA", "CLEC4C"], parent="myeloid")
+    data = {"cell_type": "pDC", "confidence": 0.9, "rationale": "pDC markers",
+            "differs_from_original": True, "markers_used": ["IL3RA"]}
+    naming = annotate._core_naming_from_dict(data, evi, model="m")
+    assert naming.differs_from_original is True
+    row = naming.to_core_name_row(evi)
+    assert row["original_label"] == "myeloid"
+    assert row["differs_from_original"] is True
+    assert "original_label" in annotate.CORE_NAME_COLS
+    assert "differs_from_original" in annotate.CORE_NAME_COLS
+
+
+def test_run_naming_stage_writes_relabel_columns(tmp_path):
+    from diagnosis import CallableChatClient
+    clusters = tmp_path / "clusters"
+    canon = tmp_path / "canonical_markers"
+    (clusters / "cmyeloid").mkdir(parents=True)
+    canon.mkdir(parents=True)
+    pd.DataFrame({"gene": ["IL3RA", "CLEC4C"], "logfoldchanges": [2.0, 2.0],
+                  "scores": [10.0, 9.0]}
+                 ).to_csv(canon / "markers_cmyeloid_0.tsv", sep="\t", index=False)
+    client = CallableChatClient(lambda s, u: json.dumps(
+        {"cell_type": "pDC", "confidence": 0.9, "rationale": "pDC markers",
+         "differs_from_original": True, "markers_used": ["IL3RA"]}), model="m")
+    engine = annotate.make_naming_engine(client=client)
+    annotate.run_naming_stage(clusters_dir=clusters, canonical_dir=canon,
+        core_names_path=tmp_path / "core_names.tsv", parents=["myeloid"],
+        engine=engine, forced=True)
+    df = pd.read_csv(tmp_path / "core_names.tsv", sep="\t")
+    assert df.loc[0, "cell_type"] == "pDC"
+    assert str(df.loc[0, "original_label"]) == "myeloid"
+    assert bool(df.loc[0, "differs_from_original"]) is True

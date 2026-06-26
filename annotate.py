@@ -31,7 +31,7 @@ except ImportError:                     # standalone use
 import pandas as pd
 
 
-NAMING_PROMPT_VERSION = 'standissect-naming-v1'
+NAMING_PROMPT_VERSION = 'standissect-naming-v2'
 NARRATIVE_PROMPT_VERSION = 'standissect-narrative-v1'
 
 # Broad, well-established lineage markers for the local naming backup. Tuned for
@@ -119,6 +119,7 @@ class CoreNaming:
     model: str | None = None
     prompt_version: str = NAMING_PROMPT_VERSION
     error: str | None = None
+    differs_from_original: bool = False
 
     def __post_init__(self):
         self.confidence = float(min(1.0, max(0.0, self.confidence)))
@@ -135,6 +136,8 @@ class CoreNaming:
             'rationale': self.rationale,
             'source': self.source,
             'model': self.model,
+            'original_label': evidence.parent_cluster,
+            'differs_from_original': self.differs_from_original,
         }
 
 
@@ -218,13 +221,19 @@ def build_core_naming_prompt(evidence: CoreEvidence) -> tuple[str, str]:
         'rationale': 'one concise sentence citing supplied markers',
         'markers_used': ['subset of the supplied marker genes'],
         'alternatives': ['other plausible cell types'],
+        'differs_from_original': 'true if your cell_type denotes a different '
+                                 'identity than the cluster\'s existing annotation '
+                                 '(evidence.parent_cluster), else false',
     }
     system = (
         "You are a single-cell biologist. Name the most likely cell type or state "
         "for a cluster from its ranked canonical marker genes, using established "
         "marker-to-cell-type knowledge. If the markers are ambiguous, return "
         '"uncertain" with low confidence. Cite only markers from the supplied '
-        "list; do not introduce markers that are not listed. Return strict JSON only."
+        "list; do not introduce markers that are not listed. The cluster's "
+        "existing annotation label is provided as evidence.parent_cluster; set "
+        "differs_from_original=true when your cell_type denotes a semantically "
+        "different identity than that label. Return strict JSON only."
     )
     user = json.dumps({
         'task': 'name_one_canonical_core',
@@ -250,6 +259,7 @@ def _core_naming_from_dict(data, evidence: CoreEvidence, *, model) -> CoreNaming
         alternatives=[str(a) for a in (data.get('alternatives') or [])],
         source='llm',
         model=model,
+        differs_from_original=bool(data.get('differs_from_original', False)),
     )
 
 
@@ -379,7 +389,8 @@ class NarrativeEngine:
 
 
 CORE_NAME_COLS = ['parent_cluster', 'core_subcluster', 'cell_type', 'confidence',
-                  'rationale', 'source', 'model']
+                  'rationale', 'source', 'model', 'original_label',
+                  'differs_from_original']
 NARRATIVE_COLS = ['parent_cluster', 'cell_type', 'narrative']
 
 
@@ -490,6 +501,8 @@ def run_naming_stage(*, clusters_dir, canonical_dir, core_names_path, parents,
             'rationale': data.get('rationale'),
             'source': data.get('source'),
             'model': data.get('model'),
+            'original_label': str(parent),
+            'differs_from_original': bool(data.get('differs_from_original', False)),
         })
     Path(core_names_path).parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows, columns=CORE_NAME_COLS).to_csv(core_names_path, sep='\t', index=False)
