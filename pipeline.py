@@ -643,7 +643,7 @@ def run_dissect_pipeline(
     pass ``labeled_h5ad_path`` to also persist those overwritten obs columns to
     an h5ad file.
 
-    ``diagnosis_mode`` is ``'rule'`` by default. ``'llm'`` and ``'hybrid'`` use a
+    ``diagnosis_mode`` is ``'llm'`` by default. ``'llm'`` and ``'hybrid'`` use a
     chat client over compact per-minor evidence packets. If no
     ``diagnosis_llm_client`` is supplied, the built-in Ark client reads
     ``ARK_API_KEY`` and uses the configured Ark model/endpoint.

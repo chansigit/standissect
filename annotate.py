@@ -19,9 +19,9 @@ import json
 from pathlib import Path
 
 try:                                    # package use (standissect.annotate)
-    from .llm_client import call_structured, LLMUnavailable
+    from .llm_client import call_structured
 except ImportError:                     # standalone use (tests import top-level)
-    from llm_client import call_structured, LLMUnavailable
+    from llm_client import call_structured
 
 import pandas as pd
 

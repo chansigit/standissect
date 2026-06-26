@@ -3,8 +3,6 @@ import pathlib
 import sys
 
 import pandas as pd
-import pytest
-
 # Import annotate as a top-level module, bypassing standissect/__init__.py
 # (which imports scanpy via .cluster). annotate.py uses dual-import.
 _PKG_DIR = pathlib.Path(__file__).resolve().parents[1]   # .../standissect
