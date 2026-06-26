@@ -82,6 +82,8 @@ class _Layout:
     @property
     def discard_cells(self): return self.root / 'discard_cells.tsv'
     @property
+    def proposed_cell_types(self): return self.root / 'proposed_cell_types.tsv'
+    @property
     def qc_drift_all(self):  return self.root / 'qc_drift_all.tsv'
     @property
     def diagnosis_all(self): return self.root / 'diagnosis_all.tsv'
@@ -203,6 +205,43 @@ def _write_cell_dispositions(lay, panel, obs_names):
         'disposition_reason': col('disposition_reason')[mask].values,
     }, columns=_DISCARD_CELL_COLS)
     discard.to_csv(lay.discard_cells, sep='\t', index=False)
+
+
+_PROPOSED_COLS = ['level', 'parent_cluster', 'subcluster', 'proposed_cell_type',
+                  'confidence', 'rationale']
+
+
+def _write_proposed_cell_types(lay, panel, core_names_df):
+    """Collect LLM-proposed cell types: minor (panel.proposed_cell_type) +
+    major (core_names.differs_from_original) into proposed_cell_types.tsv."""
+    rows = []
+    if len(panel) and 'proposed_cell_type' in panel.columns:
+        m = panel[panel['proposed_cell_type'].notna()
+                  & (panel['proposed_cell_type'].astype(str).str.strip() != '')
+                  & (panel['proposed_cell_type'].astype(str).str.lower() != 'nan')]
+        for _, r in m.iterrows():
+            rows.append({
+                'level': 'minor',
+                'parent_cluster': r.get('parent_cluster'),
+                'subcluster': r.get('subcluster'),
+                'proposed_cell_type': r.get('proposed_cell_type'),
+                'confidence': r.get('diagnosis_confidence'),
+                'rationale': r.get('diagnosis_rationale'),
+            })
+    if len(core_names_df) and 'differs_from_original' in core_names_df.columns:
+        d = core_names_df[core_names_df['differs_from_original'].apply(
+            lambda v: str(v).strip().lower() in ('true', '1'))]
+        for _, r in d.iterrows():
+            rows.append({
+                'level': 'major',
+                'parent_cluster': r.get('parent_cluster'),
+                'subcluster': r.get('core_subcluster'),
+                'proposed_cell_type': r.get('cell_type'),
+                'confidence': r.get('confidence'),
+                'rationale': r.get('rationale'),
+            })
+    pd.DataFrame(rows, columns=_PROPOSED_COLS).to_csv(
+        lay.proposed_cell_types, sep='\t', index=False)
 
 
 def _as_tuple(value):
@@ -966,6 +1005,7 @@ def run_dissect_pipeline(
         hint=annotation_hint, forced=naming_force, core_sizes=core_sizes,
         max_workers=llm_concurrency)
     core_names_df = _read_tsv(lay.core_names)
+    _write_proposed_cell_types(lay, panel, core_names_df)
 
     # ---- STAGE: per-cluster narrative (LLM only) ----------------------
     narrative_force = naming_force or diagnosis_force or ('narrative' in force)

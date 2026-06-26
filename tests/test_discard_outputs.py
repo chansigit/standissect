@@ -7,7 +7,8 @@ _PKG_PARENT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_PKG_PARENT))
 
 from standissect.pipeline import (_write_cell_dispositions, _Layout,  # noqa: E402
-                                  _PANEL_COLS, _DIAGNOSIS_COLS)
+                                  _PANEL_COLS, _DIAGNOSIS_COLS,
+                                  _write_proposed_cell_types, _PROPOSED_COLS)
 
 
 def _panel():
@@ -63,3 +64,40 @@ def test_empty_discard_writes_header_only(tmp_path):
     discard = pd.read_csv(lay.discard_cells, sep='\t')
     assert len(discard) == 0
     assert 'barcode' in discard.columns and 'input_row_index' in discard.columns
+
+
+def test_proposed_cell_types_collects_minor_and_major(tmp_path):
+    lay = _Layout(tmp_path, 'leiden')
+    lay.root.mkdir(parents=True)
+    panel = pd.DataFrame({
+        'parent_cluster': ['myeloid', 'myeloid'],
+        'subcluster': ['cmyeloid_1', 'cmyeloid_2'],
+        'proposed_cell_type': ['pDC', None],
+        'diagnosis_confidence': [0.8, 0.4],
+        'diagnosis_rationale': ['pDC markers', 'n/a'],
+    })
+    core = pd.DataFrame({
+        'parent_cluster': ['myeloid', 'tcell'],
+        'core_subcluster': ['cmyeloid_0', 'ctcell_0'],
+        'cell_type': ['cDC1', 'T cell'],
+        'confidence': [0.9, 0.95], 'rationale': ['cDC1 markers', 'CD3'],
+        'original_label': ['myeloid', 'tcell'],
+        'differs_from_original': [True, False],
+    })
+    _write_proposed_cell_types(lay, panel, core)
+    out = pd.read_csv(lay.proposed_cell_types, sep='\t')
+    assert list(out.columns) == _PROPOSED_COLS
+    assert set(out['level']) == {'minor', 'major'}
+    assert set(out['proposed_cell_type']) == {'pDC', 'cDC1'}    # 'cycling None' & non-differing excluded
+
+
+def test_proposed_cell_types_empty_header_only(tmp_path):
+    lay = _Layout(tmp_path, 'leiden')
+    lay.root.mkdir(parents=True)
+    panel = pd.DataFrame({'parent_cluster': ['0'], 'subcluster': ['c0_1'],
+                          'proposed_cell_type': [None]})
+    core = pd.DataFrame({'parent_cluster': ['0'], 'core_subcluster': ['c0_0'],
+                         'cell_type': ['T cell'], 'differs_from_original': [False]})
+    _write_proposed_cell_types(lay, panel, core)
+    out = pd.read_csv(lay.proposed_cell_types, sep='\t')
+    assert len(out) == 0 and list(out.columns) == _PROPOSED_COLS

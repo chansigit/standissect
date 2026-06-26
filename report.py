@@ -90,6 +90,20 @@ def _discards_section(root):
     return '\n'.join(h)
 
 
+def _proposed_types_section(root):
+    """The 'Proposed new / re-labeled cell types' section."""
+    root = Path(root)
+    df = _read_tsv_safe(root / 'proposed_cell_types.tsv')
+    h = ['<h2 id="proposed">Proposed new / re-labeled cell types</h2>']
+    if not len(df):
+        h.append('<p class="muted">No proposed new or re-labeled cell types.</p>')
+        return '\n'.join(h)
+    h.append(f'<p><b>{len(df)}</b> proposed.</p>')
+    h.append(df.to_html(index=False, border=0, classes='deg',
+                        float_format=lambda x: f'{x:.3g}'))
+    return '\n'.join(h)
+
+
 def _load_core_names_map(path):
     """core_names.tsv -> {parent_cluster: cell_type} (only named clusters)."""
     df = _read_tsv_safe(path)
@@ -161,6 +175,7 @@ def build_report(root, output_html=None):
     h.append('<div class="head">overview</div>')
     h.append('<a href="#overview">Overview</a>')
     h.append('<a href="#discards">Recommended discards</a>')
+    h.append('<a href="#proposed">Proposed new / re-labeled cell types</a>')
     h.append('<div class="head">clusters</div>')
     for cid in cluster_ids:
         nm = core_names.get(str(cid))
@@ -187,6 +202,7 @@ def build_report(root, output_html=None):
         h.append('<div class="cap">canonical-core cell-type names</div>')
         h.append(core_names_html)
     h.append(_discards_section(root))
+    h.append(_proposed_types_section(root))
 
     # per-cluster
     for cid in cluster_ids:

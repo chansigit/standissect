@@ -68,3 +68,19 @@ def test_report_discards_section_handles_no_discards(tmp_path):
     html = pathlib.Path(out).read_text(encoding="utf-8")
     assert 'id="discards"' in html
     assert "No clusters recommended for discard" in html
+
+
+def test_report_has_proposed_types_section(tmp_path):
+    root = tmp_path / "out" / "leiden"
+    (root / "clusters" / "c0").mkdir(parents=True)
+    pd.DataFrame({"parent_cluster": ["c0_1"], "subcluster": ["c0_1"]}
+                 ).to_csv(root / "clusters" / "c0" / "panel.tsv", sep="\t", index=False)
+    pd.DataFrame({"level": ["minor"], "parent_cluster": ["myeloid"],
+                  "subcluster": ["cmyeloid_1"], "proposed_cell_type": ["pDC"],
+                  "confidence": [0.8], "rationale": ["pDC markers"]}
+                 ).to_csv(root / "proposed_cell_types.tsv", sep="\t", index=False)
+    out = report.build_report(str(root))
+    html = pathlib.Path(out).read_text(encoding="utf-8")
+    assert 'id="proposed"' in html
+    assert 'href="#proposed"' in html
+    assert "pDC" in html
