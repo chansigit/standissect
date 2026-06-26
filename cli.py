@@ -84,6 +84,12 @@ def _add_common_run_args(parser):
                       help='Environment variable containing the Ark API key.')
     diag.add_argument('--no-diagnosis-fallback', action='store_true',
                       help='Fail instead of falling back to rule diagnosis on LLM errors.')
+    diag.add_argument('--llm-concurrency', type=int, default=8,
+                      help='Concurrent ARK calls for diagnosis/naming/narrative. Default: 8.')
+    diag.add_argument('--llm-retries', type=int, default=3,
+                      help='Retries (exp backoff + jitter) before fallback. Default: 3.')
+    diag.add_argument('--ark-timeout', type=int, default=120,
+                      help='Per-call ARK timeout (seconds). Default: 120.')
 
     rerun = parser.add_argument_group('rerun control')
     rerun.add_argument('--force', action='append', default=[],
@@ -93,7 +99,7 @@ def _add_common_run_args(parser):
     rerun.add_argument('--random-state', type=int, default=0,
                        help='Random seed for Leiden. Default: 0.')
     rerun.add_argument('--n-jobs', type=int, default=8,
-                       help='Reserved compatibility parameter. Default: 8.')
+                       help='DEG process-pool size (cross-cluster parallelism).')
     rerun.add_argument('--no-report', action='store_true',
                        help='Skip building report.html after the run.')
 
@@ -147,6 +153,9 @@ def run_cmd(args):
         naming_markers=_none_if_empty(args.naming_markers),
         force=_force_value(args.force),
         n_jobs=args.n_jobs,
+        llm_concurrency=args.llm_concurrency,
+        llm_retries=args.llm_retries,
+        diagnosis_timeout=args.ark_timeout,
         random_state=args.random_state,
     )
     if not args.no_report:

@@ -642,13 +642,14 @@ def run_dissect_pipeline(
     diagnosis_ark_endpoint=DEFAULT_ARK_ENDPOINT,
     diagnosis_ark_api_key=None,
     diagnosis_ark_api_key_env='ARK_API_KEY',
-    diagnosis_timeout=60,
+    diagnosis_timeout=120,
     diagnosis_fallback_to_rule=True,
     annotation_hint='',
     naming_markers=None,
     force=(),
     n_jobs=8,
     llm_concurrency=8,
+    llm_retries=3,
     random_state=0,
 ):
     """Run the full cleanup-diagnosis pipeline into ``<output_dir>/<cluster_col>/``.
@@ -730,11 +731,13 @@ def run_dissect_pipeline(
         timeout=diagnosis_timeout,
         fallback_to_rule=diagnosis_fallback_to_rule,
         diagnosis_roles=resolved_roles,
+        llm_retries=llm_retries,
     )
     resolved_markers = load_marker_sets(naming_markers)
     naming_engine = make_naming_engine(
-        client=chat_client, markers=resolved_markers, fallback_to_local=True)
-    narrative_engine = NarrativeEngine(chat_client) if chat_client is not None else None
+        client=chat_client, markers=resolved_markers, fallback_to_local=True,
+        llm_retries=llm_retries)
+    narrative_engine = NarrativeEngine(chat_client, llm_retries=llm_retries) if chat_client is not None else None
     lay = _Layout(output_dir, cluster_col)
     lay.root.mkdir(parents=True, exist_ok=True)
     lay.clusters.mkdir(exist_ok=True)
@@ -954,6 +957,9 @@ def run_dissect_pipeline(
         'narrative_prompt_version': NARRATIVE_PROMPT_VERSION,
         'naming_marker_types': sorted(resolved_markers),
         'random_state': random_state, 'n_jobs': n_jobs, 'force': sorted(force),
+        'llm_concurrency': llm_concurrency,
+        'llm_retries': llm_retries,
+        'diagnosis_timeout': diagnosis_timeout,
         'partition_info': partition_info,
     }, default=str, indent=2))
 
