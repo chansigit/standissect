@@ -216,3 +216,28 @@ def test_naming_retries_then_succeeds():
     r = eng.name(_evi(["CD3D", "CD3E"]))
     assert r.source == "llm" and r.cell_type == "T cell"
     assert calls["n"] == 2
+
+
+def test_naming_stage_parallel_matches_serial(tmp_path):
+    import pandas as pd
+    def _setup(root):
+        clusters = root / "clusters"; canonical = root / "canonical_markers"
+        canonical.mkdir(parents=True)
+        for p, gene in [("0", "CD3D"), ("1", "LYZ")]:
+            (clusters / f"c{p}").mkdir(parents=True)
+            pd.DataFrame({"group": [f"c{p}_0"], "rank": [0], "gene": [gene],
+                          "logfoldchanges": [3.0], "pvals": [1e-9], "pvals_adj": [1e-8],
+                          "scores": [20.0]}).to_csv(canonical / f"markers_c{p}_0.tsv",
+                                                    sep="\t", index=False)
+        return clusters, canonical
+    payload = json.dumps({"cell_type": "T cell", "confidence": 0.9, "rationale": "r",
+                          "markers_used": ["CD3D"]})
+    def eng():
+        return annotate.make_naming_engine(client=CallableChatClient(lambda s, u: payload, model="m"))
+    a = tmp_path / "a"; b = tmp_path / "b"
+    ca, cana = _setup(a); cb, canb = _setup(b)
+    annotate.run_naming_stage(clusters_dir=ca, canonical_dir=cana,
+        core_names_path=a / "core_names.tsv", parents=["0", "1"], engine=eng(), max_workers=1)
+    annotate.run_naming_stage(clusters_dir=cb, canonical_dir=canb,
+        core_names_path=b / "core_names.tsv", parents=["0", "1"], engine=eng(), max_workers=4)
+    assert (a / "core_names.tsv").read_text() == (b / "core_names.tsv").read_text()

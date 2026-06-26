@@ -24,9 +24,9 @@ except ImportError:                     # standalone use (tests import top-level
     from llm_client import call_structured
 
 try:                                    # package use
-    from .parallel import with_retry
+    from .parallel import with_retry, thread_map
 except ImportError:                     # standalone use
-    from parallel import with_retry
+    from parallel import with_retry, thread_map
 
 import pandas as pd
 
@@ -458,24 +458,25 @@ def _narrative_current(cdir, *, model) -> bool:
 
 
 def run_naming_stage(*, clusters_dir, canonical_dir, core_names_path, parents,
-                     engine, hint='', forced=False, core_sizes=None) -> list:
+                     engine, hint='', forced=False, core_sizes=None,
+                     max_workers=1) -> list:
     """Name each cluster's canonical core where missing/stale/forced; rewrite
     ``core_names.tsv`` from all ``naming.output.json``. Always runs (LLM or local)."""
     clusters_dir = Path(clusters_dir)
     canonical_dir = Path(canonical_dir)
     core_sizes = core_sizes or {}
     model = getattr(engine, 'model', None)
-    skipped: list = []
-    for parent in parents:
-        cdir = clusters_dir / f"c{parent}"
-        if not forced and _naming_current(cdir, model=model):
-            skipped.append(f'naming:c{parent}')
-            continue
+
+    def _do(parent):
+        if not forced and _naming_current(clusters_dir / f"c{parent}", model=model):
+            return f'naming:c{parent}'
         evidence = build_core_evidence(
             parent, canonical_dir / f"markers_c{parent}_0.tsv",
             n_cells=core_sizes.get(str(parent), 0), hint=hint)
         naming = engine.name(evidence)
-        write_naming_artifacts(cdir, evidence, naming)
+        write_naming_artifacts(clusters_dir / f"c{parent}", evidence, naming)
+        return None
+    skipped = [s for s in thread_map(_do, parents, max_workers=max_workers) if s]
     rows = []
     for parent in parents:
         data = _read_json(clusters_dir / f"c{parent}" / 'naming.output.json')
@@ -496,25 +497,23 @@ def run_naming_stage(*, clusters_dir, canonical_dir, core_names_path, parents,
 
 
 def run_narrative_stage(*, clusters_dir, core_names_path, narratives_path, parents,
-                        engine, hint='', forced=False) -> list:
+                        engine, hint='', forced=False, max_workers=1) -> list:
     """Write a per-cluster narrative where missing/stale/forced; rewrite
     ``narratives.tsv``. Caller runs this only when a chat client exists."""
     clusters_dir = Path(clusters_dir)
     core_names = _load_core_names(core_names_path)
     model = getattr(engine, 'model', None)
-    skipped: list = []
-    for parent in parents:
+
+    def _do(parent):
         cdir = clusters_dir / f"c{parent}"
         if not forced and _narrative_current(cdir, model=model):
-            skipped.append(f'narrative:c{parent}')
-            continue
-        evidence = ClusterNarrativeEvidence(
-            parent_cluster=str(parent),
-            cell_type=core_names.get(str(parent)),
-            minors=_read_minor_diagnoses(cdir / 'panel.tsv'),
-            hint=hint)
-        narrative = engine.narrate(evidence)
-        write_narrative_artifacts(cdir, evidence, narrative)
+            return f'narrative:c{parent}'
+        minors = _read_minor_diagnoses(cdir / 'panel.tsv')
+        evidence = ClusterNarrativeEvidence(parent_cluster=str(parent),
+            cell_type=core_names.get(str(parent)), minors=minors, hint=hint)
+        write_narrative_artifacts(cdir, evidence, engine.narrate(evidence))
+        return None
+    skipped = [s for s in thread_map(_do, parents, max_workers=max_workers) if s]
     rows = []
     for parent in parents:
         data = _read_json(clusters_dir / f"c{parent}" / 'narrative.output.json')

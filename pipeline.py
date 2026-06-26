@@ -20,6 +20,7 @@ import pandas as pd
 
 from .cluster import (umap_leiden_partition, dissect_one_cluster,
                       canonical_marker_deg, plot_minor_profile)
+from .parallel import thread_map
 from .diagnosis import (
     DEFAULT_ARK_ENDPOINT,
     DEFAULT_ARK_MODEL,
@@ -494,6 +495,7 @@ def _apply_diagnosis_to_cluster_panel(
     *,
     adata=None,
     diagnosis_roles=None,
+    llm_concurrency=1,
 ):
     """Diagnose every minor row in one cluster panel and rewrite the panel."""
     cdir = Path(cdir)
@@ -503,8 +505,8 @@ def _apply_diagnosis_to_cluster_panel(
         _ordered_panel(panel).to_csv(panel_path, sep='\t', index=False)
         return panel
 
-    rows = []
-    for _, row in panel.iterrows():
+    def _diagnose_row(idx_row):
+        _, row = idx_row
         row_dict = row.to_dict()
         subcluster = str(row_dict['subcluster'])
         reference_subcluster = str(
@@ -529,7 +531,9 @@ def _apply_diagnosis_to_cluster_panel(
         result = engine.diagnose(evidence)
         row_dict.update(result.to_panel_fields())
         write_diagnosis_artifacts(cdir, evidence, result)
-        rows.append(row_dict)
+        return row_dict
+
+    rows = thread_map(_diagnose_row, list(panel.iterrows()), max_workers=llm_concurrency)
 
     diagnosed = _ordered_panel(pd.DataFrame(rows))
     diagnosed.to_csv(panel_path, sep='\t', index=False)
@@ -544,6 +548,7 @@ def _run_diagnosis_stage(
     forced,
     adata=None,
     diagnosis_roles=None,
+    llm_concurrency=1,
 ):
     """Run diagnosis where missing, stale, or explicitly forced."""
     mode = getattr(engine, 'mode', 'rule')
@@ -559,7 +564,8 @@ def _run_diagnosis_stage(
         for p in todo:
             _apply_diagnosis_to_cluster_panel(lay.cluster_dir(p), engine,
                                               adata=adata,
-                                              diagnosis_roles=diagnosis_roles)
+                                              diagnosis_roles=diagnosis_roles,
+                                              llm_concurrency=llm_concurrency)
     print(f"[pipeline] diagnosis: {len(todo)} clusters computed, "
           f"{len(crosstab.index) - len(todo)} reused", flush=True)
     return [f'diagnosis:c{p}' for p in crosstab.index if p not in set(todo)]
@@ -631,6 +637,7 @@ def run_dissect_pipeline(
     naming_markers=None,
     force=(),
     n_jobs=8,
+    llm_concurrency=8,
     random_state=0,
 ):
     """Run the full cleanup-diagnosis pipeline into ``<output_dir>/<cluster_col>/``.
@@ -809,7 +816,8 @@ def run_dissect_pipeline(
     diagnosis_force = part_force or ('dissect' in force) or ('diagnosis' in force)
     skipped += _run_diagnosis_stage(lay, crosstab, diagnosis_engine,
                                     forced=diagnosis_force, adata=adata,
-                                    diagnosis_roles=resolved_roles)
+                                    diagnosis_roles=resolved_roles,
+                                    llm_concurrency=llm_concurrency)
 
     # ---- global panel + qc_drift_all (reassembled from disk) -----------
     panel = _concat_tsvs(lay.clusters.glob('c*/panel.tsv'))
@@ -856,7 +864,8 @@ def run_dissect_pipeline(
     skipped += run_naming_stage(
         clusters_dir=lay.clusters, canonical_dir=lay.canonical,
         core_names_path=lay.core_names, parents=parents, engine=naming_engine,
-        hint=annotation_hint, forced=naming_force, core_sizes=core_sizes)
+        hint=annotation_hint, forced=naming_force, core_sizes=core_sizes,
+        max_workers=llm_concurrency)
     core_names_df = _read_tsv(lay.core_names)
 
     # ---- STAGE: per-cluster narrative (LLM only) ----------------------
@@ -866,7 +875,8 @@ def run_dissect_pipeline(
         skipped += run_narrative_stage(
             clusters_dir=lay.clusters, core_names_path=lay.core_names,
             narratives_path=lay.narratives, parents=parents, engine=narrative_engine,
-            hint=annotation_hint, forced=narrative_force)
+            hint=annotation_hint, forced=narrative_force,
+            max_workers=llm_concurrency)
     else:
         skipped += [f'narrative:c{p}' for p in parents]
         print("[pipeline] narrative skipped (no LLM client)", flush=True)
