@@ -361,3 +361,155 @@ class NarrativeEngine:
         except Exception as e:
             return ClusterNarrative(narrative='', source='skipped',
                                     model=self.model, error=str(e))
+
+
+CORE_NAME_COLS = ['parent_cluster', 'core_subcluster', 'cell_type', 'confidence',
+                  'rationale', 'source', 'model']
+NARRATIVE_COLS = ['parent_cluster', 'cell_type', 'narrative']
+
+
+def _read_json(path):
+    try:
+        return json.loads(Path(path).read_text(encoding='utf-8'))
+    except Exception:
+        return None
+
+
+def _safe_str(value):
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return str(value)
+
+
+def _load_core_names(path) -> dict:
+    """core_names.tsv -> {parent_cluster: cell_type|None}."""
+    df = _read_tsv(path)
+    out: dict = {}
+    if len(df) and 'parent_cluster' in df.columns and 'cell_type' in df.columns:
+        for _, r in df.iterrows():
+            out[str(r['parent_cluster'])] = _safe_str(r.get('cell_type'))
+    return out
+
+
+def _read_minor_diagnoses(panel_path) -> list[dict]:
+    """A cluster's panel.tsv -> [{subcluster, likely_cause, cause_detail, diagnosis_rationale}]."""
+    df = _read_tsv(panel_path)
+    if not len(df) or 'subcluster' not in df.columns:
+        return []
+    cols = ['subcluster', 'likely_cause', 'cause_detail', 'diagnosis_rationale']
+    return [{c: _safe_str(r.get(c)) for c in cols} for _, r in df.iterrows()]
+
+
+def write_naming_artifacts(cdir, evidence: CoreEvidence, naming: CoreNaming):
+    cdir = Path(cdir)
+    cdir.mkdir(parents=True, exist_ok=True)
+    (cdir / 'naming.input.json').write_text(
+        json.dumps(evidence.to_dict(), ensure_ascii=False, indent=2), encoding='utf-8')
+    (cdir / 'naming.output.json').write_text(
+        json.dumps(naming.to_dict(), ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def write_narrative_artifacts(cdir, evidence: ClusterNarrativeEvidence,
+                              narrative: ClusterNarrative):
+    cdir = Path(cdir)
+    cdir.mkdir(parents=True, exist_ok=True)
+    (cdir / 'narrative.input.json').write_text(
+        json.dumps(evidence.to_dict(), ensure_ascii=False, indent=2), encoding='utf-8')
+    (cdir / 'narrative.output.json').write_text(
+        json.dumps(narrative.to_dict(), ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def _naming_current(cdir, *, model) -> bool:
+    data = _read_json(Path(cdir) / 'naming.output.json')
+    if not data:
+        return False
+    if data.get('prompt_version') != NAMING_PROMPT_VERSION:
+        return False
+    return data.get('model') == model
+
+
+def _narrative_current(cdir, *, model) -> bool:
+    data = _read_json(Path(cdir) / 'narrative.output.json')
+    if not data:
+        return False
+    if data.get('prompt_version') != NARRATIVE_PROMPT_VERSION:
+        return False
+    return data.get('model') == model
+
+
+def run_naming_stage(*, clusters_dir, canonical_dir, core_names_path, parents,
+                     engine, hint='', forced=False, core_sizes=None) -> list:
+    """Name each cluster's canonical core where missing/stale/forced; rewrite
+    ``core_names.tsv`` from all ``naming.output.json``. Always runs (LLM or local)."""
+    clusters_dir = Path(clusters_dir)
+    canonical_dir = Path(canonical_dir)
+    core_sizes = core_sizes or {}
+    model = getattr(engine, 'model', None)
+    skipped: list = []
+    for parent in parents:
+        cdir = clusters_dir / f"c{parent}"
+        if not forced and _naming_current(cdir, model=model):
+            skipped.append(f'naming:c{parent}')
+            continue
+        evidence = build_core_evidence(
+            parent, canonical_dir / f"markers_c{parent}_0.tsv",
+            n_cells=core_sizes.get(str(parent), 0), hint=hint)
+        naming = engine.name(evidence)
+        write_naming_artifacts(cdir, evidence, naming)
+    rows = []
+    for parent in parents:
+        data = _read_json(clusters_dir / f"c{parent}" / 'naming.output.json')
+        if not data:
+            continue
+        rows.append({
+            'parent_cluster': str(parent),
+            'core_subcluster': f"c{parent}_0",
+            'cell_type': data.get('cell_type'),
+            'confidence': data.get('confidence'),
+            'rationale': data.get('rationale'),
+            'source': data.get('source'),
+            'model': data.get('model'),
+        })
+    Path(core_names_path).parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows, columns=CORE_NAME_COLS).to_csv(core_names_path, sep='\t', index=False)
+    return skipped
+
+
+def run_narrative_stage(*, clusters_dir, core_names_path, narratives_path, parents,
+                        engine, hint='', forced=False) -> list:
+    """Write a per-cluster narrative where missing/stale/forced; rewrite
+    ``narratives.tsv``. Caller runs this only when a chat client exists."""
+    clusters_dir = Path(clusters_dir)
+    core_names = _load_core_names(core_names_path)
+    model = getattr(engine, 'model', None)
+    skipped: list = []
+    for parent in parents:
+        cdir = clusters_dir / f"c{parent}"
+        if not forced and _narrative_current(cdir, model=model):
+            skipped.append(f'narrative:c{parent}')
+            continue
+        evidence = ClusterNarrativeEvidence(
+            parent_cluster=str(parent),
+            cell_type=core_names.get(str(parent)),
+            minors=_read_minor_diagnoses(cdir / 'panel.tsv'),
+            hint=hint)
+        narrative = engine.narrate(evidence)
+        write_narrative_artifacts(cdir, evidence, narrative)
+    rows = []
+    for parent in parents:
+        data = _read_json(clusters_dir / f"c{parent}" / 'narrative.output.json')
+        if not data:
+            continue
+        rows.append({
+            'parent_cluster': str(parent),
+            'cell_type': core_names.get(str(parent)),
+            'narrative': data.get('narrative'),
+        })
+    Path(narratives_path).parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows, columns=NARRATIVE_COLS).to_csv(narratives_path, sep='\t', index=False)
+    return skipped

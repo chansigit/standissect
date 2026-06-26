@@ -129,3 +129,78 @@ def test_narrative_empty_to_skipped():
     assert r.source == "skipped"
     assert r.narrative == ""
     assert r.error is not None
+
+
+def _write_markers(canonical, parent, genes):
+    canonical.mkdir(parents=True, exist_ok=True)
+    n = len(genes)
+    pd.DataFrame({
+        "group": [f"c{parent}_0"] * n, "rank": list(range(n)), "gene": genes,
+        "logfoldchanges": [3.0] * n, "pvals": [1e-9] * n, "pvals_adj": [1e-8] * n,
+        "scores": [float(20 - i) for i in range(n)],
+    }).to_csv(canonical / f"markers_c{parent}_0.tsv", sep="\t", index=False)
+
+
+def test_run_naming_stage_writes_and_is_idempotent(tmp_path):
+    clusters = tmp_path / "clusters"
+    canonical = tmp_path / "canonical_markers"
+    (clusters / "c0").mkdir(parents=True)
+    _write_markers(canonical, "0", ["CD3D", "CD3E", "TRAC"])
+    core_names = tmp_path / "core_names.tsv"
+    eng = annotate.make_naming_engine(client=None)      # local
+    sk1 = annotate.run_naming_stage(
+        clusters_dir=clusters, canonical_dir=canonical, core_names_path=core_names,
+        parents=["0"], engine=eng, forced=False)
+    assert sk1 == []
+    df = pd.read_csv(core_names, sep="\t")
+    assert df.loc[0, "cell_type"] == "T cell"
+    assert (clusters / "c0" / "naming.output.json").exists()
+    sk2 = annotate.run_naming_stage(
+        clusters_dir=clusters, canonical_dir=canonical, core_names_path=core_names,
+        parents=["0"], engine=eng, forced=False)
+    assert sk2 == ["naming:c0"]         # local model None matches -> skipped
+
+
+def test_run_naming_stage_recomputes_on_model_change(tmp_path):
+    clusters = tmp_path / "clusters"
+    canonical = tmp_path / "canonical_markers"
+    (clusters / "c0").mkdir(parents=True)
+    _write_markers(canonical, "0", ["CD3D"])
+    core_names = tmp_path / "core_names.tsv"
+    annotate.run_naming_stage(
+        clusters_dir=clusters, canonical_dir=canonical, core_names_path=core_names,
+        parents=["0"], engine=annotate.make_naming_engine(client=None), forced=False)
+    llm = annotate.make_naming_engine(client=CallableChatClient(
+        lambda s, u: json.dumps({"cell_type": "T cell", "confidence": 0.9,
+                                 "rationale": "r", "markers_used": ["CD3D"]}), model="m"))
+    sk = annotate.run_naming_stage(
+        clusters_dir=clusters, canonical_dir=canonical, core_names_path=core_names,
+        parents=["0"], engine=llm, forced=False)
+    assert sk == []                     # model None -> 'm' => recomputed
+
+
+def test_run_narrative_stage_writes_and_is_idempotent(tmp_path):
+    clusters = tmp_path / "clusters"
+    (clusters / "c0").mkdir(parents=True)
+    pd.DataFrame({"subcluster": ["c0_1"], "likely_cause": ["doublet-driven"],
+                  "cause_detail": ["x"], "diagnosis_rationale": ["y"]}
+                 ).to_csv(clusters / "c0" / "panel.tsv", sep="\t", index=False)
+    core_names = tmp_path / "core_names.tsv"
+    pd.DataFrame({"parent_cluster": ["0"], "core_subcluster": ["c0_0"],
+                  "cell_type": ["T cell"], "confidence": [0.9], "rationale": ["r"],
+                  "source": ["llm"], "model": ["m"]}).to_csv(core_names, sep="\t", index=False)
+    narr = tmp_path / "narratives.tsv"
+    eng = annotate.NarrativeEngine(CallableChatClient(
+        lambda s, u: json.dumps({"narrative": "A T cell cluster with a doublet fragment."}),
+        model="m"))
+    sk = annotate.run_narrative_stage(
+        clusters_dir=clusters, core_names_path=core_names, narratives_path=narr,
+        parents=["0"], engine=eng, forced=False)
+    assert sk == []
+    df = pd.read_csv(narr, sep="\t")
+    assert "doublet" in df.loc[0, "narrative"]
+    assert df.loc[0, "cell_type"] == "T cell"
+    sk2 = annotate.run_narrative_stage(
+        clusters_dir=clusters, core_names_path=core_names, narratives_path=narr,
+        parents=["0"], engine=eng, forced=False)
+    assert sk2 == ["narrative:c0"]
