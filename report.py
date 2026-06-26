@@ -9,6 +9,7 @@ Usage:  python -m standissect.report <output_root>
 """
 from __future__ import annotations
 import base64
+import html as _html
 import sys
 from pathlib import Path
 
@@ -45,6 +46,37 @@ def _table(path, *, max_rows=None):
                              float_format=lambda x: f'{x:.3g}')
 
 
+def _read_tsv_safe(path):
+    try:
+        return pd.read_csv(path, sep='\t')
+    except Exception:
+        return pd.DataFrame()
+
+
+def _load_core_names_map(path):
+    """core_names.tsv -> {parent_cluster: cell_type} (only named clusters)."""
+    df = _read_tsv_safe(path)
+    out = {}
+    if len(df) and 'parent_cluster' in df.columns and 'cell_type' in df.columns:
+        for _, r in df.iterrows():
+            ct = r.get('cell_type')
+            if ct is not None and not (isinstance(ct, float) and pd.isna(ct)) and str(ct) != 'nan':
+                out[str(r['parent_cluster'])] = str(ct)
+    return out
+
+
+def _load_narratives_map(path):
+    """narratives.tsv -> {parent_cluster: narrative}."""
+    df = _read_tsv_safe(path)
+    out = {}
+    if len(df) and 'parent_cluster' in df.columns and 'narrative' in df.columns:
+        for _, r in df.iterrows():
+            nv = r.get('narrative')
+            if nv is not None and not (isinstance(nv, float) and pd.isna(nv)) and str(nv) != 'nan':
+                out[str(r['parent_cluster'])] = str(nv)
+    return out
+
+
 _CSS = """
 body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;color:#222;}
 #sidebar{position:fixed;top:0;left:0;width:164px;height:100%;overflow-y:auto;
@@ -66,6 +98,8 @@ details{margin:5px 0;}
 summary{cursor:pointer;font-size:13px;color:#2d4a73;}
 .missing{color:#b00;font-size:12px;}
 .muted{color:#889;font-size:11px;margin:2px 0;}
+.narrative{font-size:13px;color:#333;background:#f6f8fc;border-left:3px solid #4a6da7;
+  padding:8px 12px;margin:6px 0 12px;line-height:1.5;}
 """
 
 
@@ -78,6 +112,8 @@ def build_report(root, output_html=None):
         (d.name[1:] for d in clusters_dir.glob('c*') if d.is_dir()),
         key=lambda x: int(x) if x.isdigit() else 10**9,
     )
+    core_names = _load_core_names_map(root / 'core_names.tsv')
+    narratives = _load_narratives_map(root / 'narratives.tsv')
 
     h = ['<!doctype html><html><head><meta charset="utf-8">',
          f'<title>dissect report — {root.name}</title>',
@@ -89,7 +125,9 @@ def build_report(root, output_html=None):
     h.append('<a href="#overview">Overview</a>')
     h.append('<div class="head">clusters</div>')
     for cid in cluster_ids:
-        h.append(f'<a href="#c{cid}">cluster {cid}</a>')
+        nm = core_names.get(str(cid))
+        label = f'cluster {cid}' + (f' — {_html.escape(nm)}' if nm else '')
+        h.append(f'<a href="#c{cid}">{label}</a>')
     h.append('</div>')
 
     # --- main ---
@@ -106,11 +144,20 @@ def build_report(root, output_html=None):
     h.append('</div>')
     h.append('<div class="cap">minor sub-population panel — all clusters</div>')
     h.append(_table(root / 'panel.tsv'))
+    core_names_html = _table(root / 'core_names.tsv')
+    if core_names_html:
+        h.append('<div class="cap">canonical-core cell-type names</div>')
+        h.append(core_names_html)
 
     # per-cluster
     for cid in cluster_ids:
         cdir = clusters_dir / f'c{cid}'
-        h.append(f'<h2 id="c{cid}">cluster {cid}</h2>')
+        nm = core_names.get(str(cid))
+        title = f'cluster {cid}' + (f' — {_html.escape(nm)}' if nm else '')
+        h.append(f'<h2 id="c{cid}">{title}</h2>')
+        narr = narratives.get(str(cid))
+        if narr:
+            h.append(f'<p class="narrative">{_html.escape(narr)}</p>')
         h.append('<div class="imgrow">')
         h.append('<div><div class="cap">minor-profile heatmap</div>'
                  + _img(cdir / 'minor_profile.png') + '</div>')
