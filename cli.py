@@ -68,7 +68,14 @@ def _add_common_run_args(parser):
 
     diag = parser.add_argument_group('diagnosis')
     diag.add_argument('--diagnosis-mode', choices=('rule', 'llm', 'hybrid'),
-                      default='rule', help='Diagnosis engine. Default: rule.')
+                      default='llm', help='Diagnosis engine. Default: llm '
+                      '(falls back to rule when no ARK key is available).')
+    diag.add_argument('--annotation-hint', default='',
+                      help='Optional tissue/context hint for naming + narrative, '
+                           'e.g. "synovial tissue, OA vs RA".')
+    diag.add_argument('--naming-markers',
+                      help='Optional TSV (cell_type<TAB>gene,gene,...) for the '
+                           'local naming backup. Defaults to a bundled marker set.')
     diag.add_argument('--ark-model', default=DEFAULT_ARK_MODEL,
                       help=f'Ark model for LLM modes. Default: {DEFAULT_ARK_MODEL}.')
     diag.add_argument('--ark-endpoint', default=DEFAULT_ARK_ENDPOINT,
@@ -79,8 +86,9 @@ def _add_common_run_args(parser):
                       help='Fail instead of falling back to rule diagnosis on LLM errors.')
 
     rerun = parser.add_argument_group('rerun control')
-    rerun.add_argument('--force', action='append', default=(),
-                       choices=('partition', 'dissect', 'diagnosis', 'canonical', 'profile', 'all'),
+    rerun.add_argument('--force', action='append', default=[],
+                       choices=('partition', 'dissect', 'diagnosis', 'canonical',
+                                'naming', 'narrative', 'profile', 'all'),
                        help='Stage to recompute. Repeatable; use all for every stage.')
     rerun.add_argument('--random-state', type=int, default=0,
                        help='Random seed for Leiden. Default: 0.')
@@ -135,6 +143,8 @@ def run_cmd(args):
         diagnosis_ark_endpoint=args.ark_endpoint,
         diagnosis_ark_api_key_env=args.ark_api_key_env,
         diagnosis_fallback_to_rule=not args.no_diagnosis_fallback,
+        annotation_hint=args.annotation_hint,
+        naming_markers=_none_if_empty(args.naming_markers),
         force=_force_value(args.force),
         n_jobs=args.n_jobs,
         random_state=args.random_state,
