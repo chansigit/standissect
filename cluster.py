@@ -203,51 +203,17 @@ def wilcoxon_vs_reference(
     chunk_size: int = 2000,
     apply_logfoldchanges_expm1: bool = True,
 ) -> pd.DataFrame:
-    """Vectorised 2-group Mann-Whitney U test: ``group`` vs ``reference``.
-
-    A scanpy-free replacement for a 2-group ``rank_genes_groups`` comparison —
-    same statistic (normal-approx z, no tie correction) and lfc convention.
-    Gene-chunked + serial → memory-bounded, no process pool, no per-call copy.
-
-    Only cells whose ``group_labels`` equal ``group`` or ``reference`` take part.
-    Returns the top ``n_genes`` genes by score descending (matching scanpy's
-    ``rank_genes_groups``), columns: names / logfoldchanges / pvals / pvals_adj
-    / scores / direction.
+    """Tie-corrected 2-group Mann-Whitney: ``group`` vs ``reference`` (sparse, no
+    densify). ``chunk_size`` accepted for compatibility but unused. Returns the
+    top ``n_genes`` by score desc: names / logfoldchanges / pvals / pvals_adj /
+    scores / direction.
     """
-    import scipy.sparse
-    from scipy.stats import rankdata, norm
+    from scipy.stats import norm
     from statsmodels.stats.multitest import multipletests
-
     group_labels = np.asarray(group_labels)
     sel = (group_labels == group) | (group_labels == reference)
-    Xsel = X[sel]
-    in_g = group_labels[sel] == group
-    n1 = int(in_g.sum())
-    n2 = int((~in_g).sum())
-    n = n1 + n2
-    n_total = X.shape[1]
-    is_sparse = scipy.sparse.issparse(Xsel)
-
-    z = np.full(n_total, np.nan, dtype=np.float64)
-    mean_in = np.zeros(n_total, dtype=np.float64)
-    mean_out = np.zeros(n_total, dtype=np.float64)
-    if n1 >= 1 and n2 >= 1:
-        mu = n1 * n2 / 2.0
-        sigma = (n1 * n2 * (n + 1) / 12.0) ** 0.5
-        for s in range(0, n_total, chunk_size):
-            e = min(s + chunk_size, n_total)
-            Xc = Xsel[:, s:e]
-            if is_sparse:
-                Xc = Xc.toarray()
-            Xc = np.asarray(Xc, dtype=np.float32)
-            mean_in[s:e] = Xc[in_g].mean(axis=0)
-            mean_out[s:e] = Xc[~in_g].mean(axis=0)
-            if n1 >= 2 and n2 >= 2 and sigma > 0:
-                ranks = rankdata(Xc, axis=0, method='average')
-                R1 = ranks[in_g].sum(axis=0)
-                U1 = R1 - n1 * (n1 + 1) / 2.0
-                z[s:e] = (U1 - mu) / sigma
-
+    stats = _wilcoxon_sparse_stats(X[sel], group_labels[sel], [group, reference])
+    z, mean_in, mean_out = stats[group]
     with np.errstate(invalid='ignore'):
         p = 2.0 * norm.sf(np.abs(z))
     p = np.where(np.isnan(z), 1.0, p)
@@ -918,8 +884,79 @@ def plot_minor_profile(
 
 
 # =============================================================================
-#  Vectorised + parallel Mann-Whitney one-vs-rest (faster scanpy replacement)
+#  Sparse tie-corrected rank-once Wilcoxon kernel (presto-style)
 # =============================================================================
+
+def _wilcoxon_sparse_stats(X, group_labels, groups):
+    """Tie-corrected one-vs-rest Mann-Whitney across all genes for ``groups``,
+    on sparse (or dense) X WITHOUT densifying. Returns {group: (z, mean_in, mean_out)}
+    of float32 (n_genes,) arrays. presto-style: rank each gene once (only its
+    nonzeros), share rank sums across groups via Gᵀ@ranks sparse matmuls.
+
+    Assumes X is non-negative (log-normalized counts) so all zeros are the
+    smallest values. z is NaN where a group has <2 cells or n-2<n1.
+    """
+    import scipy.sparse as sp
+    from scipy.stats import rankdata
+
+    Xcsc = sp.csc_matrix(X).astype(np.float64)
+    Xcsc.eliminate_zeros()
+    N, n_genes = Xcsc.shape
+    indptr, indices, data = Xcsc.indptr, Xcsc.indices, Xcsc.data
+
+    # Per-gene: global ranks of the nonzeros, zero-block rank r0, tie term T.
+    r0 = np.empty(n_genes, dtype=np.float64)
+    Tcorr = np.empty(n_genes, dtype=np.float64)
+    rnz_data = np.empty_like(data)
+    for g in range(n_genes):
+        s, e = indptr[g], indptr[g + 1]
+        nz = e - s
+        nzeros = N - nz
+        r0[g] = (nzeros + 1) / 2.0
+        Tg = float(nzeros) ** 3 - float(nzeros)          # zero-block tie group
+        if nz:
+            vals = data[s:e]
+            rr = rankdata(vals, method='average')        # ranks 1..nz among nonzeros
+            rnz_data[s:e] = rr + nzeros                  # global ranks
+            _, counts = np.unique(vals, return_counts=True)
+            tt = counts[counts > 1].astype(np.float64)
+            Tg += float(np.sum(tt ** 3 - tt))
+        Tcorr[g] = Tg
+
+    Rnz = sp.csc_matrix((rnz_data, indices, indptr), shape=(N, n_genes))
+    Bnz = sp.csc_matrix((np.ones_like(data), indices, indptr), shape=(N, n_genes))
+
+    groups = list(groups)
+    col_of = {k: i for i, k in enumerate(groups)}
+    rows = np.arange(N)
+    cols = np.fromiter((col_of[l] for l in group_labels), dtype=np.int64, count=N)
+    G = sp.csr_matrix((np.ones(N), (rows, cols)), shape=(N, len(groups)))
+    GT = G.T.tocsr()                                     # (K x N)
+    n1 = np.asarray(G.sum(axis=0)).ravel()               # (K,)
+
+    S_nz = np.asarray((GT @ Rnz).todense())              # (K x n_genes) rank sums of nonzeros
+    C_nz = np.asarray((GT @ Bnz).todense())              # (K x n_genes) nonzero counts
+    gsum = np.asarray((GT @ Xcsc).todense())             # (K x n_genes) expression sums
+    total = np.asarray(Xcsc.sum(axis=0)).ravel()         # (n_genes,)
+
+    out = {}
+    denom = N * (N - 1) if N > 1 else 1
+    for i, k in enumerate(groups):
+        n1k = float(n1[i]); n2k = float(N - n1[i])
+        if n1k < 2 or n2k < 2:
+            z = np.full(n_genes, np.nan, dtype=np.float32)
+        else:
+            R1 = S_nz[i] + r0 * (n1k - C_nz[i])
+            U1 = R1 - n1k * (n1k + 1) / 2.0
+            var = (n1k * n2k / 12.0) * ((N + 1) - Tcorr / denom)
+            with np.errstate(invalid='ignore', divide='ignore'):
+                z = (U1 - n1k * n2k / 2.0) / np.sqrt(var)
+            z = np.where(var > 0, z, np.nan).astype(np.float32)
+        mean_in = (gsum[i] / n1k if n1k else np.zeros(n_genes)).astype(np.float32)
+        mean_out = ((total - gsum[i]) / n2k if n2k else np.zeros(n_genes)).astype(np.float32)
+        out[k] = (z, mean_in, mean_out)
+    return out
+
 
 def wilcoxon_one_vs_rest(
     X,
@@ -930,171 +967,33 @@ def wilcoxon_one_vs_rest(
     chunk_size: int | None = None,
     apply_logfoldchanges_expm1: bool = True,
 ) -> pd.DataFrame:
-    """One-vs-rest Mann-Whitney U test — vectorised across genes, parallel across groups.
+    """One-vs-rest tie-corrected Mann-Whitney U, sparse and vectorised across all
+    groups (presto-style, no densify). ``n_jobs``/``chunk_size`` accepted for
+    backward compatibility but unused — the kernel is single-pass over sparse X.
 
-    X : (n_cells, n_genes) sparse OR dense, log1p-normalised expression.
-    group_labels : array-like (n_cells,) — categorical group labels.
-    gene_names : list of length n_genes.
-    n_jobs : 1 = serial; -1 = all cores. The work is split across groups.
-    chunk_size : if not None, use the chunked-genes mode (memory-bounded).
-
-    Returns a long DataFrame: group, gene, scores (z), pvals, pvals_adj,
-    logfoldchanges, mean_in, mean_out.
+    Returns long: group, gene, scores (z), pvals, pvals_adj, logfoldchanges,
+    mean_in, mean_out.
     """
-    import scipy.sparse
-    from scipy.stats import rankdata, norm
+    from scipy.stats import norm
     from statsmodels.stats.multitest import multipletests
-    n_cells, n_genes = X.shape
     group_labels = np.asarray(group_labels)
-    unique_groups = sorted(set(group_labels.tolist()))
-    is_sparse = scipy.sparse.issparse(X)
-
-    if chunk_size is not None:
-        return _wilcoxon_chunked(
-            X, group_labels, gene_names=gene_names,
-            chunk_size=chunk_size, n_jobs=n_jobs,
-            apply_logfoldchanges_expm1=apply_logfoldchanges_expm1,
-        )
-
-    if is_sparse:
-        Xd = X.toarray().astype(np.float32, copy=False)
-    else:
-        Xd = np.asarray(X, dtype=np.float32)
-    ranks = rankdata(Xd, axis=0, method='average').astype(np.float32)
-
-    def _per_group(k):
-        mask = (group_labels == k)
-        n1 = int(mask.sum())
-        n2 = n_cells - n1
-        if n1 < 2 or n2 < 2:
-            return k, None
-        R1    = ranks[mask].sum(axis=0, dtype=np.float64)
-        U1    = R1 - n1 * (n1 + 1) / 2.0
-        mu    = n1 * n2 / 2.0
-        sigma = (n1 * n2 * (n_cells + 1) / 12.0) ** 0.5
-        z     = ((U1 - mu) / sigma).astype(np.float32)
-        mi    = Xd[mask].mean(axis=0, dtype=np.float32)
-        mo    = Xd[~mask].mean(axis=0, dtype=np.float32)
-        return k, (z, mi, mo)
-
-    if n_jobs == 1 or len(unique_groups) == 1:
-        results = [_per_group(k) for k in unique_groups]
-    else:
-        from joblib import Parallel, delayed
-        results = Parallel(
-            n_jobs=n_jobs, backend='loky', max_nbytes='1M', verbose=0,
-        )(delayed(_per_group)(k) for k in unique_groups)
-
+    groups = sorted(set(group_labels.tolist()))
+    stats = _wilcoxon_sparse_stats(X, group_labels, groups)
     frames = []
-    for k, payload in results:
-        if payload is None:
-            continue
-        z, mi, mo = payload
+    for k in groups:
+        z, mi, mo = stats[k]
         with np.errstate(invalid='ignore'):
             p = 2.0 * norm.sf(np.abs(z))
         p = np.where(np.isnan(z), 1.0, p)
         padj = multipletests(p, method='fdr_bh')[1]
-        if apply_logfoldchanges_expm1:
-            lfc = np.log2((np.expm1(mi) + 1e-9) / (np.expm1(mo) + 1e-9))
-        else:
-            lfc = mi - mo
-        frames.append(pd.DataFrame({
-            'group':           k,
-            'gene':            gene_names,
-            'scores':          z,
-            'pvals':           p,
-            'pvals_adj':       padj,
-            'logfoldchanges':  lfc,
-            'mean_in':         mi,
-            'mean_out':        mo,
-        }))
-    return pd.concat(frames, ignore_index=True)
-
-
-def _wilcoxon_chunked(
-    X,
-    group_labels,
-    *,
-    gene_names,
-    chunk_size: int,
-    n_jobs: int,
-    apply_logfoldchanges_expm1: bool,
-) -> pd.DataFrame:
-    """Chunked-over-genes fallback for the memory-bounded case."""
-    import scipy.sparse
-    from scipy.stats import rankdata, norm
-    from statsmodels.stats.multitest import multipletests
-    n_cells, n_genes = X.shape
-    group_labels = np.asarray(group_labels)
-    unique_groups = sorted(set(group_labels.tolist()))
-    is_sparse = scipy.sparse.issparse(X)
-    group_masks = {k: (group_labels == k) for k in unique_groups}
-    group_sizes = {k: int(m.sum()) for k, m in group_masks.items()}
-
-    def _proc(start, end):
-        Xc = X[:, start:end]
-        if is_sparse:
-            Xc = Xc.toarray()
-        Xc = np.asarray(Xc, dtype=np.float32)
-        ranks = rankdata(Xc, axis=0, method='average').astype(np.float32)
-        out = {}
-        for k in unique_groups:
-            mask = group_masks[k]; n1 = group_sizes[k]; n2 = n_cells - n1
-            if n1 < 2 or n2 < 2:
-                out[k] = (np.full(end - start, np.nan, dtype=np.float32),
-                          np.zeros(end - start, dtype=np.float32),
-                          np.zeros(end - start, dtype=np.float32))
-                continue
-            R1 = ranks[mask].sum(axis=0, dtype=np.float64)
-            U1 = R1 - n1 * (n1 + 1) / 2.0
-            mu = n1 * n2 / 2.0
-            sigma = (n1 * n2 * (n_cells + 1) / 12.0) ** 0.5
-            z = ((U1 - mu) / sigma).astype(np.float32)
-            mi = Xc[mask].mean(axis=0, dtype=np.float32)
-            mo = Xc[~mask].mean(axis=0, dtype=np.float32)
-            out[k] = (z, mi, mo)
-        return (start, end), out
-
-    chunks = [(s, min(s + chunk_size, n_genes)) for s in range(0, n_genes, chunk_size)]
-    if n_jobs == 1 or len(chunks) <= 1:
-        chunk_results = [_proc(s, e) for s, e in chunks]
-    else:
-        global _WILCOXON_WORKER
-        _WILCOXON_WORKER = _proc
-        import multiprocessing as mp
-        ctx = mp.get_context('fork')
-        with ctx.Pool(processes=n_jobs) as pool:
-            chunk_results = pool.starmap(_wilcoxon_worker_call, chunks)
-        _WILCOXON_WORKER = None
-
-    z_all = {k: np.empty(n_genes, dtype=np.float32) for k in unique_groups}
-    mi_all= {k: np.empty(n_genes, dtype=np.float32) for k in unique_groups}
-    mo_all= {k: np.empty(n_genes, dtype=np.float32) for k in unique_groups}
-    for (s, e), out_dict in chunk_results:
-        for k, (z, mi, mo) in out_dict.items():
-            z_all[k][s:e] = z; mi_all[k][s:e] = mi; mo_all[k][s:e] = mo
-
-    frames = []
-    for k in unique_groups:
-        z = z_all[k]
-        with np.errstate(invalid='ignore'):
-            p = 2.0 * norm.sf(np.abs(z))
-        p = np.where(np.isnan(z), 1.0, p)
-        padj = multipletests(p, method='fdr_bh')[1]
-        mi = mi_all[k]; mo = mo_all[k]
         if apply_logfoldchanges_expm1:
             lfc = np.log2((np.expm1(mi) + 1e-9) / (np.expm1(mo) + 1e-9))
         else:
             lfc = mi - mo
         frames.append(pd.DataFrame({
             'group': k, 'gene': gene_names,
-            'scores': z, 'pvals': p, 'pvals_adj': padj,
+            'scores': np.nan_to_num(z, nan=0.0).astype(np.float32),
+            'pvals': p, 'pvals_adj': padj,
             'logfoldchanges': lfc, 'mean_in': mi, 'mean_out': mo,
         }))
     return pd.concat(frames, ignore_index=True)
-
-
-# Module-level slot + wrapper so fork-pool workers can pickle the call.
-_WILCOXON_WORKER = None
-def _wilcoxon_worker_call(start, end):
-    return _WILCOXON_WORKER(start, end)
