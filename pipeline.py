@@ -1,9 +1,10 @@
 """standissect.pipeline — unified orchestrator for the cluster cleanup-diagnosis.
 
-``run_dissect_pipeline`` runs the three stages (partition + dissect,
-canonical-core markers, minor-profile heatmaps) into one output tree, with
-file-existence idempotency. The analysis primitives live in
-``standissect.cluster``.
+``run_dissect_pipeline`` runs partitioning, per-cluster evidence extraction,
+diagnosis, canonical-core markers, and minor-profile heatmaps into one output
+tree, with file-existence idempotency. The analysis primitives live in
+``standissect.cluster`` and the interpretation layer lives in
+``standissect.diagnosis``.
 
 The stages run serially and memory-bounded — the canonical-core Wilcoxon is
 gene-chunked to stay within a modest memory budget; the per-minor DEG is a
@@ -19,13 +20,31 @@ import pandas as pd
 
 from .cluster import (umap_leiden_partition, dissect_one_cluster,
                       canonical_marker_deg, plot_minor_profile)
+from .diagnosis import (
+    DEFAULT_ARK_ENDPOINT,
+    DEFAULT_ARK_MODEL,
+    PROMPT_VERSION,
+    build_minor_evidence,
+    make_diagnosis_engine,
+    normalize_diagnosis_roles,
+    safe_subcluster_name,
+    write_diagnosis_artifacts,
+)
 
-_STAGES = ('partition', 'dissect', 'canonical', 'profile')
+_STAGES = ('partition', 'dissect', 'diagnosis', 'canonical', 'profile')
 
-_PANEL_COLS = ['parent_cluster', 'subcluster', 'minor_umap_label',
-               'main_umap_label', 'n_cells', 'frac_of_parent',
+_PANEL_COLS = ['parent_cluster', 'subcluster', 'reference_subcluster',
+               'minor_umap_label', 'main_umap_label', 'n_cells', 'frac_of_parent',
                'top5_up_genes', 'top5_down_genes', 'n_sig_genes',
-               'top_sample_enriched', 'top_qc_drift', 'likely_cause']
+               'top_sample_enriched', 'top_qc_drift', 'rule_baseline',
+               'likely_cause', 'cause_detail', 'diagnosis_confidence',
+               'diagnosis_rationale', 'llm_overrode_rule']
+
+_DIAGNOSIS_COLS = ['parent_cluster', 'subcluster', 'reference_subcluster',
+                   'minor_umap_label', 'main_umap_label', 'n_cells', 'frac_of_parent',
+                   'rule_baseline', 'likely_cause', 'cause_detail',
+                   'diagnosis_confidence', 'diagnosis_rationale',
+                   'llm_overrode_rule']
 
 
 class _Layout:
@@ -44,6 +63,8 @@ class _Layout:
     def cell_labels(self):   return self.root / 'cell_labels.tsv'
     @property
     def qc_drift_all(self):  return self.root / 'qc_drift_all.tsv'
+    @property
+    def diagnosis_all(self): return self.root / 'diagnosis_all.tsv'
     @property
     def params(self):        return self.root / 'params.json'
     @property
@@ -100,6 +121,85 @@ def _concat_tsvs(paths):
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
+def _read_tsv(path):
+    """Read a TSV, returning an empty DataFrame for missing/invalid files."""
+    try:
+        return pd.read_csv(path, sep='\t')
+    except Exception:
+        return pd.DataFrame()
+
+
+def _ordered_panel(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure headline panel columns remain in a stable order."""
+    out = df.copy()
+    for col in _PANEL_COLS:
+        if col not in out.columns:
+            out[col] = None
+    extras = [c for c in out.columns if c not in _PANEL_COLS]
+    return out[_PANEL_COLS + extras]
+
+
+def _as_tuple(value):
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    return tuple(v for v in value if v)
+
+
+def _unique_cols(*groups):
+    cols = []
+    for group in groups:
+        for col in _as_tuple(group):
+            if col and col not in cols:
+                cols.append(col)
+    return tuple(cols)
+
+
+def _resolve_metadata_roles(
+    *,
+    cat_cols,
+    qc_cols,
+    sample_col,
+    batch_col,
+    donor_col,
+    library_col,
+    condition_col,
+    doublet_score_col,
+    mito_col,
+    feature_count_col,
+    umi_count_col,
+    extra_cat_cols,
+    extra_qc_cols,
+    diagnosis_roles,
+):
+    """Resolve role-specific metadata columns into evidence columns and roles."""
+    role_source_cols = _unique_cols(sample_col, batch_col, donor_col, library_col)
+    role_map = normalize_diagnosis_roles({
+        'source_cols': role_source_cols,
+        'doublet_score_col': doublet_score_col,
+        'mitochondrial_col': mito_col,
+        'feature_count_col': feature_count_col,
+        'umi_count_col': umi_count_col,
+        **(diagnosis_roles or {}),
+    }, use_defaults=False)
+    resolved_cat = _unique_cols(
+        cat_cols,
+        role_map.get('source_cols'),
+        condition_col,
+        extra_cat_cols,
+    )
+    resolved_qc = _unique_cols(
+        qc_cols,
+        role_map.get('doublet_score_col'),
+        role_map.get('mitochondrial_col'),
+        role_map.get('feature_count_col'),
+        role_map.get('umi_count_col'),
+        extra_qc_cols,
+    )
+    return resolved_cat, resolved_qc, role_map
+
+
 def _write_h5ad_atomic(adata, path):
     """Write an AnnData file via a same-directory temporary file."""
     path = Path(path)
@@ -118,7 +218,7 @@ def _persist_cluster(adata, res, *, cdir, umap_key, cluster_col, size_rank_name)
     cdir.mkdir(parents=True, exist_ok=True)
     parent = res['parent']
 
-    pd.DataFrame(res['panel_rows'], columns=_PANEL_COLS).to_csv(
+    _ordered_panel(pd.DataFrame(res['panel_rows'])).to_csv(
         cdir / 'panel.tsv', sep='\t', index=False)
     res['subcluster_labels'].to_frame().to_csv(
         cdir / 'subcluster_labels.tsv', sep='\t')
@@ -130,8 +230,10 @@ def _persist_cluster(adata, res, *, cdir, umap_key, cluster_col, size_rank_name)
             cdir / f"qc_drift_{size_rank_name[minor]}.tsv", sep='\t', index=False)
     comp_by_cat: dict = {}
     for (minor, cat), cdf in res['composition'].items():
+        reference_subcluster = f"c{parent}_0"
         comp_by_cat.setdefault(cat, []).append(
-            cdf.assign(subcluster=size_rank_name[minor]))
+            cdf.assign(cat_col=cat, subcluster=size_rank_name[minor],
+                       reference_subcluster=reference_subcluster))
     for cat, frames in comp_by_cat.items():
         pd.concat(frames, ignore_index=True).to_csv(
             cdir / f"composition_{cat.replace('/', '_')}.tsv",
@@ -204,6 +306,251 @@ def _plot_global_umap(adata, *, cluster_col, umap_label_col, umap_key, path):
     plt.close(fig)
 
 
+def _composition_frames_for_subcluster(cdir, subcluster):
+    """Load all composition drift rows for one subcluster."""
+    frames = []
+    for path in sorted(Path(cdir).glob('composition_*.tsv')):
+        df = _read_tsv(path)
+        if not len(df):
+            continue
+        if 'subcluster' in df.columns:
+            df = df[df['subcluster'].astype(str) == str(subcluster)]
+        if not len(df):
+            continue
+        if 'cat_col' not in df.columns:
+            df = df.copy()
+            df['cat_col'] = path.stem.replace('composition_', '')
+        frames.append(df)
+    return frames
+
+
+def _split_subcluster_label(label):
+    """Parse c{parent}_{rank}; parent may itself contain underscores."""
+    body = str(label)
+    if body.startswith('c'):
+        body = body[1:]
+    parent, sep, rank = body.rpartition('_')
+    if sep and rank.isdigit():
+        return parent, int(rank)
+    return body, None
+
+
+def _diagnostic_genes_from_deg(deg_df, *, max_each=8):
+    """Genes used to compare this minor against every major core."""
+    if deg_df is None or not len(deg_df):
+        return []
+    name_col = 'names' if 'names' in deg_df.columns else 'gene'
+    if name_col not in deg_df.columns or 'logfoldchanges' not in deg_df.columns:
+        return []
+    up = (deg_df[deg_df['logfoldchanges'] > 0]
+          .sort_values('scores' if 'scores' in deg_df.columns else 'logfoldchanges',
+                       ascending=False)[name_col].head(max_each).tolist())
+    down = (deg_df[deg_df['logfoldchanges'] < 0]
+            .sort_values('scores' if 'scores' in deg_df.columns else 'logfoldchanges',
+                         ascending=True)[name_col].head(max_each).tolist())
+    genes = []
+    for g in up + down:
+        if g not in genes:
+            genes.append(g)
+    return genes
+
+
+def _mean_expression_for_label(adata, *, subcluster_col, label, genes):
+    """Mean expression vector for one subcluster label over ``genes``."""
+    if not genes or subcluster_col not in adata.obs.columns:
+        return None
+    var_idx = pd.Index(adata.var_names).get_indexer(genes)
+    keep = var_idx >= 0
+    if not keep.any():
+        return None
+    var_idx = var_idx[keep]
+    labels = adata.obs[subcluster_col].astype(str).values
+    mask = labels == str(label)
+    if not mask.any():
+        return None
+    X = adata.X[mask][:, var_idx]
+    if hasattr(X, 'toarray'):
+        X = X.toarray()
+    return np.asarray(X, dtype=np.float64).mean(axis=0)
+
+
+def _pearson(a, b):
+    if a is None or b is None or len(a) != len(b) or len(a) < 2:
+        return None
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    if np.nanstd(a) <= 1e-12 or np.nanstd(b) <= 1e-12:
+        return None
+    r = float(np.corrcoef(a, b)[0, 1])
+    return r if np.isfinite(r) else None
+
+
+def _major_core_comparisons(
+    adata,
+    *,
+    subcluster_col,
+    subcluster,
+    reference_subcluster,
+    deg_df,
+    max_other_cores=10,
+):
+    """Compare one minor to its own major core and the nearest other major cores."""
+    if adata is None or subcluster_col not in adata.obs.columns:
+        return []
+    genes = _diagnostic_genes_from_deg(deg_df)
+    minor_mean = _mean_expression_for_label(
+        adata, subcluster_col=subcluster_col, label=subcluster, genes=genes)
+    if minor_mean is None:
+        return []
+
+    labels = pd.Series(adata.obs[subcluster_col].astype(str).values)
+    core_labels = []
+    for label in labels.unique():
+        _parent, rank = _split_subcluster_label(label)
+        if rank == 0:
+            core_labels.append(str(label))
+    rows = []
+    for core in sorted(core_labels):
+        core_mean = _mean_expression_for_label(
+            adata, subcluster_col=subcluster_col, label=core, genes=genes)
+        if core_mean is None:
+            continue
+        corr = _pearson(minor_mean, core_mean)
+        delta = float(np.mean(np.abs(minor_mean - core_mean)))
+        parent, _rank = _split_subcluster_label(core)
+        rows.append({
+            'core_subcluster': core,
+            'core_parent_cluster': parent,
+            'is_reference_core': core == str(reference_subcluster),
+            'n_core_cells': int((labels == core).sum()),
+            'n_genes': len(genes),
+            'pearson_on_minor_deg_genes': corr,
+            'mean_abs_delta_on_minor_deg_genes': delta,
+            'genes_used': genes,
+        })
+    reference = [r for r in rows if r['is_reference_core']]
+    others = [r for r in rows if not r['is_reference_core']]
+    def _core_sort_key(row):
+        corr = row['pearson_on_minor_deg_genes']
+        return (
+            corr is None,
+            -(corr if corr is not None else -np.inf),
+            row['mean_abs_delta_on_minor_deg_genes'],
+        )
+
+    others.sort(key=_core_sort_key)
+    return reference + others[:max_other_cores]
+
+
+def _diagnosis_output_path(cdir, subcluster):
+    return Path(cdir) / f"diagnosis_{safe_subcluster_name(subcluster)}.output.json"
+
+
+def _diagnosis_current(cdir, row, *, mode, model):
+    """True if the saved diagnosis matches the requested mode/model."""
+    path = _diagnosis_output_path(cdir, row['subcluster'])
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return False
+    if data.get('prompt_version') != PROMPT_VERSION:
+        return False
+    if data.get('diagnosis_mode') != mode:
+        return False
+    if mode != 'rule' and data.get('model') != model:
+        return False
+    return True
+
+
+def _cluster_diagnoses_current(cdir, *, mode, model):
+    panel = _read_tsv(Path(cdir) / 'panel.tsv')
+    if not len(panel):
+        return True
+    if 'subcluster' not in panel.columns:
+        return False
+    return all(_diagnosis_current(cdir, row, mode=mode, model=model)
+               for _, row in panel.iterrows())
+
+
+def _apply_diagnosis_to_cluster_panel(
+    cdir,
+    engine,
+    *,
+    adata=None,
+    diagnosis_roles=None,
+):
+    """Diagnose every minor row in one cluster panel and rewrite the panel."""
+    cdir = Path(cdir)
+    panel_path = cdir / 'panel.tsv'
+    panel = _read_tsv(panel_path)
+    if not len(panel):
+        _ordered_panel(panel).to_csv(panel_path, sep='\t', index=False)
+        return panel
+
+    rows = []
+    for _, row in panel.iterrows():
+        row_dict = row.to_dict()
+        subcluster = str(row_dict['subcluster'])
+        reference_subcluster = str(
+            row_dict.get('reference_subcluster')
+            or f"c{row_dict.get('parent_cluster')}_0"
+        )
+        row_dict['reference_subcluster'] = reference_subcluster
+        deg_df = _read_tsv(cdir / f"deg_{subcluster}.tsv")
+        qc_df = _read_tsv(cdir / f"qc_drift_{subcluster}.tsv")
+        comp = _composition_frames_for_subcluster(cdir, subcluster)
+        core_comparisons = _major_core_comparisons(
+            adata,
+            subcluster_col='original_cluster_split',
+            subcluster=subcluster,
+            reference_subcluster=reference_subcluster,
+            deg_df=deg_df,
+        )
+        evidence = build_minor_evidence(
+            row_dict, deg_df=deg_df, qc_df=qc_df, composition_frames=comp,
+            major_core_comparisons=core_comparisons,
+            diagnosis_roles=diagnosis_roles)
+        result = engine.diagnose(evidence)
+        row_dict.update(result.to_panel_fields())
+        write_diagnosis_artifacts(cdir, evidence, result)
+        rows.append(row_dict)
+
+    diagnosed = _ordered_panel(pd.DataFrame(rows))
+    diagnosed.to_csv(panel_path, sep='\t', index=False)
+    return diagnosed
+
+
+def _run_diagnosis_stage(
+    lay,
+    crosstab,
+    engine,
+    *,
+    forced,
+    adata=None,
+    diagnosis_roles=None,
+):
+    """Run diagnosis where missing, stale, or explicitly forced."""
+    mode = getattr(engine, 'mode', 'rule')
+    model = getattr(engine, 'model', None)
+    todo = [
+        p for p in crosstab.index
+        if forced or not _cluster_diagnoses_current(
+            lay.cluster_dir(p), mode=mode, model=model)
+    ]
+    if todo:
+        print(f"[pipeline] diagnosing minor causes for {len(todo)} clusters "
+              f"(mode={mode}) ...", flush=True)
+        for p in todo:
+            _apply_diagnosis_to_cluster_panel(lay.cluster_dir(p), engine,
+                                              adata=adata,
+                                              diagnosis_roles=diagnosis_roles)
+    print(f"[pipeline] diagnosis: {len(todo)} clusters computed, "
+          f"{len(crosstab.index) - len(todo)} reused", flush=True)
+    return [f'diagnosis:c{p}' for p in crosstab.index if p not in set(todo)]
+
+
 # _dissect_one bundles "dissect one cluster + persist it"; the heavy shared
 # inputs (adata, crosstab, ...) are passed through this module-level slot
 # rather than threaded through every call.
@@ -236,9 +583,20 @@ def run_dissect_pipeline(
     output_dir,
     labeled_h5ad_path=None,
     umap_key='X_umap',
-    cat_cols=('orig.ident', 'batch'),
-    qc_cols=('percent.mt', 'nCount_RNA', 'nFeature_RNA', 'hybrid_score'),
-    sample_col='orig.ident',
+    cat_cols=None,
+    qc_cols=None,
+    sample_col=None,
+    batch_col=None,
+    donor_col=None,
+    library_col=None,
+    condition_col=None,
+    doublet_score_col=None,
+    mito_col=None,
+    feature_count_col=None,
+    umi_count_col=None,
+    extra_cat_cols=(),
+    extra_qc_cols=(),
+    diagnosis_roles=None,
     resolution=0.5,
     target_k=None,
     target_tol=2,
@@ -247,6 +605,14 @@ def run_dissect_pipeline(
     top_n_deg=50,
     top_n_canonical=50,
     deg_layer=None,
+    diagnosis_mode='rule',
+    diagnosis_llm_client=None,
+    diagnosis_ark_model=DEFAULT_ARK_MODEL,
+    diagnosis_ark_endpoint=DEFAULT_ARK_ENDPOINT,
+    diagnosis_ark_api_key=None,
+    diagnosis_ark_api_key_env='ARK_API_KEY',
+    diagnosis_timeout=60,
+    diagnosis_fallback_to_rule=True,
     force=(),
     n_jobs=8,
     random_state=0,
@@ -255,12 +621,25 @@ def run_dissect_pipeline(
 
     Idempotent: a unit is skipped when its primary output file already exists and
     the unit is not named in ``force`` (a subset of {'partition','dissect',
-    'canonical','profile'}, or 'all'). Existing ``adata.obs['umap_cluster']`` and
-    ``adata.obs['original_cluster_split']`` are overwritten in memory. Recomputed
-    labels always go to ``cell_labels.tsv``; pass ``labeled_h5ad_path`` to also
-    persist those overwritten obs columns to an h5ad file.
+    'diagnosis','canonical','profile'}, or 'all'). Existing
+    ``adata.obs['umap_cluster']`` and ``adata.obs['original_cluster_split']`` are
+    overwritten in memory. Recomputed labels always go to ``cell_labels.tsv``;
+    pass ``labeled_h5ad_path`` to also persist those overwritten obs columns to
+    an h5ad file.
 
-    Stages run serially; stage 3's Wilcoxon is gene-chunked to bound memory.
+    ``diagnosis_mode`` is ``'rule'`` by default. ``'llm'`` and ``'hybrid'`` use a
+    chat client over compact per-minor evidence packets. If no
+    ``diagnosis_llm_client`` is supplied, the built-in Ark client reads
+    ``ARK_API_KEY`` and uses the configured Ark model/endpoint.
+
+    Metadata is role-specific. ``sample_col``, ``batch_col``, ``donor_col`` and
+    ``library_col`` are source-like categorical columns for sample/batch-driven
+    diagnosis. ``condition_col`` and ``extra_cat_cols`` are composition evidence
+    only. QC roles are controlled by ``doublet_score_col``, ``mito_col``,
+    ``feature_count_col`` and ``umi_count_col``. ``cat_cols`` and ``qc_cols`` are
+    retained as compatibility escape hatches for extra evidence columns.
+
+    Stages run serially; canonical-core Wilcoxon is gene-chunked to bound memory.
     ``n_jobs`` is currently unused (reserved).
 
     Returns ``{'root', 'crosstab', 'panel', 'partition_info', 'canonical_deg',
@@ -272,6 +651,33 @@ def run_dissect_pipeline(
     if cluster_col not in adata.obs.columns:
         raise KeyError(f"cluster_col '{cluster_col}' not in adata.obs")
     force = _normalize_force(force)
+    resolved_cat_cols, resolved_qc_cols, resolved_roles = _resolve_metadata_roles(
+        cat_cols=cat_cols,
+        qc_cols=qc_cols,
+        sample_col=sample_col,
+        batch_col=batch_col,
+        donor_col=donor_col,
+        library_col=library_col,
+        condition_col=condition_col,
+        doublet_score_col=doublet_score_col,
+        mito_col=mito_col,
+        feature_count_col=feature_count_col,
+        umi_count_col=umi_count_col,
+        extra_cat_cols=extra_cat_cols,
+        extra_qc_cols=extra_qc_cols,
+        diagnosis_roles=diagnosis_roles,
+    )
+    diagnosis_engine = make_diagnosis_engine(
+        mode=diagnosis_mode,
+        llm_client=diagnosis_llm_client,
+        ark_api_key=diagnosis_ark_api_key,
+        ark_api_key_env=diagnosis_ark_api_key_env,
+        ark_model=diagnosis_ark_model,
+        ark_endpoint=diagnosis_ark_endpoint,
+        timeout=diagnosis_timeout,
+        fallback_to_rule=diagnosis_fallback_to_rule,
+        diagnosis_roles=resolved_roles,
+    )
     lay = _Layout(output_dir, cluster_col)
     lay.root.mkdir(parents=True, exist_ok=True)
     lay.clusters.mkdir(exist_ok=True)
@@ -348,8 +754,8 @@ def run_dissect_pipeline(
         _DISSECT_CTX = {
             'adata': adata, 'cluster_col': cluster_col,
             'umap_label_col': umap_label_col, 'crosstab': crosstab,
-            'srn_by_parent': srn_by_parent, 'cat_cols': cat_cols,
-            'qc_cols': qc_cols, 'top_n_deg': top_n_deg, 'deg_layer': deg_layer,
+            'srn_by_parent': srn_by_parent, 'cat_cols': resolved_cat_cols,
+            'qc_cols': resolved_qc_cols, 'top_n_deg': top_n_deg, 'deg_layer': deg_layer,
             'min_subcluster_size': min_subcluster_size, 'umap_key': umap_key,
             'lay': lay,
         }
@@ -361,11 +767,20 @@ def run_dissect_pipeline(
     print(f"[pipeline] dissect: {len(todo)} clusters computed, "
           f"{len(crosstab.index) - len(todo)} reused", flush=True)
 
+    # ---- STAGE 3: per-minor diagnosis --------------------------------
+    diagnosis_force = part_force or ('dissect' in force) or ('diagnosis' in force)
+    skipped += _run_diagnosis_stage(lay, crosstab, diagnosis_engine,
+                                    forced=diagnosis_force, adata=adata,
+                                    diagnosis_roles=resolved_roles)
+
     # ---- global panel + qc_drift_all (reassembled from disk) -----------
     panel = _concat_tsvs(lay.clusters.glob('c*/panel.tsv'))
     if not len(panel):
         panel = pd.DataFrame(columns=_PANEL_COLS)
+    panel = _ordered_panel(panel)
     panel.to_csv(lay.panel, sep='\t', index=False)
+    diag_cols = [c for c in _DIAGNOSIS_COLS if c in panel.columns]
+    panel[diag_cols].to_csv(lay.diagnosis_all, sep='\t', index=False)
     qc_all = _concat_tsvs(lay.clusters.glob('c*/qc_drift_*.tsv'))
     if len(qc_all):
         qc_all.to_csv(lay.qc_drift_all, sep='\t', index=False)
@@ -375,7 +790,7 @@ def run_dissect_pipeline(
                       umap_label_col=umap_label_col, umap_key=umap_key,
                       path=lay.global_umap)
 
-    # ---- STAGE 3: canonical-core markers -------------------------------
+    # ---- STAGE 4: canonical-core markers -------------------------------
     canon_force = part_force or ('canonical' in force)
     if _skip(lay.canonical_deg, canon_force):
         canonical_deg = pd.read_csv(lay.canonical_deg, sep='\t')
@@ -394,7 +809,7 @@ def run_dissect_pipeline(
         )
         canonical_deg = canon_res['deg']
 
-    # ---- STAGE 4: per-cluster minor-profile heatmaps -------------------
+    # ---- STAGE 5: per-cluster minor-profile heatmaps -------------------
     profile_force = part_force or ('dissect' in force) or ('profile' in force)
     if profile_force:
         parents_todo = [str(p) for p in crosstab.index]
@@ -409,7 +824,7 @@ def run_dissect_pipeline(
         plot_minor_profile(
             adata, subcluster_col='original_cluster_split',
             canonical_deg_df=canonical_deg, clusters_dir=str(lay.clusters),
-            qc_cols=qc_cols, sample_col=sample_col,
+            qc_cols=resolved_qc_cols, sample_col=sample_col,
             top_n_canonical=5, top_n_minor=5,
             min_subcluster_size=min_subcluster_size, parents=parents_todo,
         )
@@ -417,12 +832,27 @@ def run_dissect_pipeline(
     # ---- params.json ---------------------------------------------------
     lay.params.write_text(json.dumps({
         'cluster_col': cluster_col, 'umap_key': umap_key,
-        'cat_cols': list(cat_cols), 'qc_cols': list(qc_cols),
-        'sample_col': sample_col, 'resolution': resolution,
+        'cat_cols': list(resolved_cat_cols), 'qc_cols': list(resolved_qc_cols),
+        'sample_col': sample_col, 'batch_col': batch_col,
+        'donor_col': donor_col, 'library_col': library_col,
+        'condition_col': condition_col,
+        'doublet_score_col': doublet_score_col,
+        'mito_col': mito_col,
+        'feature_count_col': feature_count_col,
+        'umi_count_col': umi_count_col,
+        'extra_cat_cols': list(_as_tuple(extra_cat_cols)),
+        'extra_qc_cols': list(_as_tuple(extra_qc_cols)),
+        'diagnosis_roles': resolved_roles,
+        'resolution': resolution,
         'target_k': target_k, 'target_tol': target_tol,
         'n_neighbors': n_neighbors,
         'min_subcluster_size': min_subcluster_size, 'top_n_deg': top_n_deg,
         'top_n_canonical': top_n_canonical, 'deg_layer': deg_layer,
+        'diagnosis_mode': diagnosis_mode,
+        'diagnosis_model': getattr(diagnosis_engine, 'model', None),
+        'diagnosis_prompt_version': PROMPT_VERSION,
+        'diagnosis_ark_endpoint': diagnosis_ark_endpoint,
+        'diagnosis_fallback_to_rule': diagnosis_fallback_to_rule,
         'random_state': random_state, 'n_jobs': n_jobs, 'force': sorted(force),
         'partition_info': partition_info,
     }, default=str, indent=2))

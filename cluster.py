@@ -123,27 +123,6 @@ def _qc_drift(
     return df
 
 
-def _likely_cause(top_sample: dict | None, top_qc: dict | None, n_sig: int) -> str:
-    """Apply the precedence rule from the design doc."""
-    if top_sample and top_sample.get('padj', 1) < 0.05 and top_sample.get('log2_OR', 0) >= 2:
-        return 'sample-driven'
-    if top_qc:
-        col = top_qc.get('qc_col')
-        rel = top_qc.get('relative_delta', 0)
-        delta = top_qc.get('delta', 0)
-        padj = top_qc.get('padj', 1)
-        if padj < 0.05:
-            if col == 'hybrid_score' and rel > 0.5:
-                return 'doublet-driven'
-            if col == 'percent.mt' and delta > 2:
-                return 'low-quality (high mt)'
-            if col == 'nFeature_RNA' and rel < -0.3:
-                return 'shallow-depth'
-    if n_sig >= 20:
-        return 'biology-candidate'
-    return 'unclear'
-
-
 def umap_leiden_partition(
     umap_xy: np.ndarray,
     *,
@@ -311,7 +290,7 @@ def dissect_one_cluster(
 
     Each off-main fragment with >= ``min_subcluster_size`` cells is a "minor" and
     gets DEG vs the main (vectorised Mann-Whitney), composition + QC drift, and a
-    ``likely_cause`` verdict.
+    compact evidence row. Final diagnosis is handled by ``standissect.diagnosis``.
 
     Returns a dict. The monolithic case (no minor) comes back with empty
     ``panel_rows`` / ``deg`` / ``qc_drift`` / ``composition``; ``subcluster_labels``
@@ -319,8 +298,9 @@ def dissect_one_cluster(
     """
     parent = str(parent)
     row = crosstab_row.sort_values(ascending=False)
+    reference_subcluster = f"c{parent}_0"
     main_label = next(u for u, name in size_rank_name.items()
-                      if name == f"c{parent}_0")
+                      if name == reference_subcluster)
     minors = [u for u in row.index
               if u != main_label and int(row[u]) >= min_subcluster_size]
 
@@ -365,7 +345,7 @@ def dissect_one_cluster(
                          (deg_df['logfoldchanges'].abs() > 0.5)).sum())
             deg[minor] = deg_df
 
-            top_sample = None
+            top_composition = None
             for c in cat_cols:
                 if c not in obs_parent.columns:
                     continue
@@ -375,16 +355,20 @@ def dissect_one_cluster(
                 cdf.insert(1, 'minor_umap', minor)
                 composition[(minor, c)] = cdf
                 sig = cdf[(cdf['padj'] < 0.05) & (cdf['log2_OR'] > 0)]
-                if not sig.empty and c == 'orig.ident':
+                if not sig.empty:
                     t = sig.sort_values('log2_OR', ascending=False).iloc[0]
-                    top_sample = {'category': t['category'],
-                                  'log2_OR': float(t['log2_OR']),
-                                  'padj': float(t['padj'])}
+                    candidate = {'cat_col': c, 'category': t['category'],
+                                 'log2_OR': float(t['log2_OR']),
+                                 'padj': float(t['padj'])}
+                    if (top_composition is None or
+                            candidate['log2_OR'] > top_composition['log2_OR']):
+                        top_composition = candidate
 
             qdf = _qc_drift(obs_parent, group_col='__main_minor', group=minor,
                             reference='main', qc_cols=tuple(qc_cols))
             qdf.insert(0, 'parent', parent)
             qdf.insert(1, 'minor_umap', minor)
+            qdf.insert(2, 'reference_subcluster', reference_subcluster)
             qc_drift[minor] = qdf
             top_qc = None
             if not qdf.empty:
@@ -404,6 +388,7 @@ def dissect_one_cluster(
             panel_rows.append({
                 'parent_cluster':      parent,
                 'subcluster':          size_rank_name[minor],
+                'reference_subcluster': reference_subcluster,
                 'minor_umap_label':    minor,
                 'main_umap_label':     main_label,
                 'n_cells':             n_in_minor,
@@ -412,12 +397,19 @@ def dissect_one_cluster(
                 'top5_down_genes':     ','.join(dns),
                 'n_sig_genes':         n_sig,
                 'top_sample_enriched': (
-                    f"{top_sample['category']} (log2OR={top_sample['log2_OR']:.2f}, "
-                    f"q={top_sample['padj']:.1e})" if top_sample else None),
+                    f"{top_composition['cat_col']}={top_composition['category']} "
+                    f"(log2OR={top_composition['log2_OR']:.2f}, "
+                    f"q={top_composition['padj']:.1e})"
+                    if top_composition else None),
                 'top_qc_drift': (
                     f"{top_qc['qc_col']} (Δ={top_qc['delta']:+.2f}, "
                     f"q={top_qc['padj']:.1e})" if top_qc else None),
-                'likely_cause': _likely_cause(top_sample, top_qc, n_sig),
+                'rule_baseline':        None,
+                'likely_cause':         None,
+                'cause_detail':         None,
+                'diagnosis_confidence': None,
+                'diagnosis_rationale':  None,
+                'llm_overrode_rule':    False,
             })
 
     return {
@@ -710,8 +702,8 @@ def plot_minor_profile(
     subcluster_col: str,
     canonical_deg_df: pd.DataFrame,
     clusters_dir,
-    qc_cols: tuple = ('percent.mt', 'nCount_RNA', 'nFeature_RNA', 'hybrid_score'),
-    sample_col='orig.ident',
+    qc_cols: tuple = (),
+    sample_col=None,
     top_n_canonical: int = 5,
     top_n_minor: int = 5,
     min_subcluster_size: int = 50,
