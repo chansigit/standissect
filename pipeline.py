@@ -25,13 +25,23 @@ from .diagnosis import (
     DEFAULT_ARK_MODEL,
     PROMPT_VERSION,
     build_minor_evidence,
+    make_chat_client,
     make_diagnosis_engine,
     normalize_diagnosis_roles,
     safe_subcluster_name,
     write_diagnosis_artifacts,
 )
+from .annotate import (
+    NAMING_PROMPT_VERSION,
+    NARRATIVE_PROMPT_VERSION,
+    NarrativeEngine,
+    load_marker_sets,
+    make_naming_engine,
+    run_naming_stage,
+    run_narrative_stage,
+)
 
-_STAGES = ('partition', 'dissect', 'diagnosis', 'canonical', 'profile')
+_STAGES = ('partition', 'dissect', 'diagnosis', 'canonical', 'naming', 'narrative', 'profile')
 
 _PANEL_COLS = ['parent_cluster', 'subcluster', 'reference_subcluster',
                'minor_umap_label', 'main_umap_label', 'n_cells', 'frac_of_parent',
@@ -71,6 +81,10 @@ class _Layout:
     def global_umap(self):   return self.root / 'global_umap_compare.png'
     @property
     def canonical_deg(self): return self.canonical / 'deg_long.tsv'
+    @property
+    def core_names(self):    return self.root / 'core_names.tsv'
+    @property
+    def narratives(self):    return self.root / 'narratives.tsv'
 
     def cluster_dir(self, parent):    return self.clusters / f"c{parent}"
     def cluster_panel(self, parent):  return self.cluster_dir(parent) / 'panel.tsv'
@@ -613,6 +627,8 @@ def run_dissect_pipeline(
     diagnosis_ark_api_key_env='ARK_API_KEY',
     diagnosis_timeout=60,
     diagnosis_fallback_to_rule=True,
+    annotation_hint='',
+    naming_markers=None,
     force=(),
     n_jobs=8,
     random_state=0,
@@ -621,7 +637,7 @@ def run_dissect_pipeline(
 
     Idempotent: a unit is skipped when its primary output file already exists and
     the unit is not named in ``force`` (a subset of {'partition','dissect',
-    'diagnosis','canonical','profile'}, or 'all'). Existing
+    'diagnosis','canonical','naming','narrative','profile'}, or 'all'). Existing
     ``adata.obs['umap_cluster']`` and ``adata.obs['original_cluster_split']`` are
     overwritten in memory. Recomputed labels always go to ``cell_labels.tsv``;
     pass ``labeled_h5ad_path`` to also persist those overwritten obs columns to
@@ -667,9 +683,27 @@ def run_dissect_pipeline(
         extra_qc_cols=extra_qc_cols,
         diagnosis_roles=diagnosis_roles,
     )
-    diagnosis_engine = make_diagnosis_engine(
+    # Build the chat client once and share it across diagnosis + naming +
+    # narrative. A missing key (or rule mode) yields None -> graceful degrade.
+    chat_client = make_chat_client(
         mode=diagnosis_mode,
         llm_client=diagnosis_llm_client,
+        ark_api_key=diagnosis_ark_api_key,
+        ark_api_key_env=diagnosis_ark_api_key_env,
+        ark_model=diagnosis_ark_model,
+        ark_endpoint=diagnosis_ark_endpoint,
+        timeout=diagnosis_timeout,
+    )
+    effective_diagnosis_mode = diagnosis_mode
+    if diagnosis_mode != 'rule' and chat_client is None:
+        print(f"[pipeline] WARNING: diagnosis_mode={diagnosis_mode!r} requested but "
+              f"no LLM client is available (set {diagnosis_ark_api_key_env} or pass "
+              f"diagnosis_llm_client). Falling back to rule diagnosis; naming uses "
+              f"local marker overlap; narrative is skipped.", flush=True)
+        effective_diagnosis_mode = 'rule'
+    diagnosis_engine = make_diagnosis_engine(
+        mode=effective_diagnosis_mode,
+        llm_client=chat_client,
         ark_api_key=diagnosis_ark_api_key,
         ark_api_key_env=diagnosis_ark_api_key_env,
         ark_model=diagnosis_ark_model,
@@ -678,6 +712,10 @@ def run_dissect_pipeline(
         fallback_to_rule=diagnosis_fallback_to_rule,
         diagnosis_roles=resolved_roles,
     )
+    resolved_markers = load_marker_sets(naming_markers)
+    naming_engine = make_naming_engine(
+        client=chat_client, markers=resolved_markers, fallback_to_local=True)
+    narrative_engine = NarrativeEngine(chat_client) if chat_client is not None else None
     lay = _Layout(output_dir, cluster_col)
     lay.root.mkdir(parents=True, exist_ok=True)
     lay.clusters.mkdir(exist_ok=True)
@@ -809,6 +847,31 @@ def run_dissect_pipeline(
         )
         canonical_deg = canon_res['deg']
 
+    # ---- STAGE: core cell-type naming (always runs) -------------------
+    parents = [str(p) for p in crosstab.index]
+    core_sizes = {str(p): int(crosstab.loc[p].max()) for p in crosstab.index}
+    naming_force = part_force or ('canonical' in force) or ('naming' in force)
+    print(f"[pipeline] naming canonical cores "
+          f"(source={'llm' if chat_client is not None else 'local'}) ...", flush=True)
+    skipped += run_naming_stage(
+        clusters_dir=lay.clusters, canonical_dir=lay.canonical,
+        core_names_path=lay.core_names, parents=parents, engine=naming_engine,
+        hint=annotation_hint, forced=naming_force, core_sizes=core_sizes)
+    core_names_df = _read_tsv(lay.core_names)
+
+    # ---- STAGE: per-cluster narrative (LLM only) ----------------------
+    narrative_force = naming_force or diagnosis_force or ('narrative' in force)
+    if narrative_engine is not None:
+        print("[pipeline] writing per-cluster narratives ...", flush=True)
+        skipped += run_narrative_stage(
+            clusters_dir=lay.clusters, core_names_path=lay.core_names,
+            narratives_path=lay.narratives, parents=parents, engine=narrative_engine,
+            hint=annotation_hint, forced=narrative_force)
+    else:
+        skipped += [f'narrative:c{p}' for p in parents]
+        print("[pipeline] narrative skipped (no LLM client)", flush=True)
+    narratives_df = _read_tsv(lay.narratives)
+
     # ---- STAGE 5: per-cluster minor-profile heatmaps -------------------
     profile_force = part_force or ('dissect' in force) or ('profile' in force)
     if profile_force:
@@ -849,10 +912,16 @@ def run_dissect_pipeline(
         'min_subcluster_size': min_subcluster_size, 'top_n_deg': top_n_deg,
         'top_n_canonical': top_n_canonical, 'deg_layer': deg_layer,
         'diagnosis_mode': diagnosis_mode,
+        'effective_diagnosis_mode': effective_diagnosis_mode,
         'diagnosis_model': getattr(diagnosis_engine, 'model', None),
         'diagnosis_prompt_version': PROMPT_VERSION,
         'diagnosis_ark_endpoint': diagnosis_ark_endpoint,
         'diagnosis_fallback_to_rule': diagnosis_fallback_to_rule,
+        'annotation_hint': annotation_hint,
+        'annotation_model': getattr(chat_client, 'model', None),
+        'naming_prompt_version': NAMING_PROMPT_VERSION,
+        'narrative_prompt_version': NARRATIVE_PROMPT_VERSION,
+        'naming_marker_types': sorted(resolved_markers),
         'random_state': random_state, 'n_jobs': n_jobs, 'force': sorted(force),
         'partition_info': partition_info,
     }, default=str, indent=2))
@@ -863,4 +932,5 @@ def run_dissect_pipeline(
 
     return {'root': str(lay.root), 'crosstab': crosstab, 'panel': panel,
             'partition_info': partition_info, 'canonical_deg': canonical_deg,
+            'core_names': core_names_df, 'narratives': narratives_df,
             'skipped': skipped}
