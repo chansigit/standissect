@@ -38,3 +38,33 @@ def test_build_report_tolerates_missing_annotation(tmp_path):
     out = report.build_report(str(root))          # no core_names/narratives
     html = pathlib.Path(out).read_text(encoding="utf-8")
     assert 'id="c0"' in html                       # still renders the cluster
+
+
+def test_report_has_discards_section(tmp_path):
+    root = tmp_path / "out" / "leiden"
+    (root / "clusters" / "c0").mkdir(parents=True)
+    pd.DataFrame({
+        "parent_cluster": ["0", "0"], "subcluster": ["c0_1", "c0_2"],
+        "n_cells": [12, 7], "likely_cause": ["doublet-driven", "cell-cycle"],
+        "diagnosis_confidence": [0.9, 0.8],
+        "recommended_disposition": ["DISCARD", "KEEP"],
+        "disposition_reason": ["doublets", "cycling"],
+    }).to_csv(root / "panel.tsv", sep="\t", index=False)
+    out = report.build_report(str(root))
+    html = pathlib.Path(out).read_text(encoding="utf-8")
+    assert 'id="discards"' in html
+    assert 'href="#discards"' in html
+    assert "12" in html and "c0_1" in html
+
+
+def test_report_discards_section_handles_no_discards(tmp_path):
+    root = tmp_path / "out" / "leiden"
+    (root / "clusters" / "c0").mkdir(parents=True)
+    pd.DataFrame({"parent_cluster": ["0"], "subcluster": ["c0_1"], "n_cells": [9],
+                  "likely_cause": ["biology-candidate"],
+                  "recommended_disposition": ["KEEP"]}
+                 ).to_csv(root / "panel.tsv", sep="\t", index=False)
+    out = report.build_report(str(root))
+    html = pathlib.Path(out).read_text(encoding="utf-8")
+    assert 'id="discards"' in html
+    assert "No clusters recommended for discard" in html

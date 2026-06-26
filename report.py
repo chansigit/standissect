@@ -53,6 +53,43 @@ def _read_tsv_safe(path):
         return pd.DataFrame()
 
 
+def _discards_section(root):
+    """The 'Recommended discards' section, built from panel.tsv."""
+    root = Path(root)
+    panel = _read_tsv_safe(root / 'panel.tsv')
+    h = ['<h2 id="discards">Recommended discards</h2>']
+    if not len(panel) or 'recommended_disposition' not in panel.columns:
+        h.append('<p class="muted">No disposition information available.</p>')
+        return '\n'.join(h)
+    disp = panel['recommended_disposition'].astype(str)
+    discard = panel[disp == 'DISCARD']
+    uncertain = panel[disp == 'UNCERTAIN']
+    if not len(discard):
+        h.append('<p class="muted">No clusters recommended for discard.</p>')
+    else:
+        n_cells = int(pd.to_numeric(discard.get('n_cells'),
+                                    errors='coerce').fillna(0).sum())
+        by_cause = (discard['likely_cause'].astype(str).value_counts().to_dict()
+                    if 'likely_cause' in discard.columns else {})
+        cause_str = ', '.join(f'{k}: {v}' for k, v in by_cause.items())
+        h.append(f'<p><b>{len(discard)}</b> clusters recommended for discard, '
+                 f'<b>{n_cells}</b> cells total. By cause — {cause_str}.</p>')
+        cols = [c for c in ('subcluster', 'n_cells', 'likely_cause',
+                            'diagnosis_confidence', 'disposition_reason')
+                if c in discard.columns]
+        h.append(discard[cols].to_html(index=False, border=0, classes='deg',
+                                       float_format=lambda x: f'{x:.3g}'))
+    if len(uncertain):
+        cols = [c for c in ('subcluster', 'n_cells', 'likely_cause',
+                            'disposition_reason') if c in uncertain.columns]
+        h.append('<details><summary>flagged — UNCERTAIN (kept by default): '
+                 f'{len(uncertain)} clusters</summary>'
+                 + uncertain[cols].to_html(index=False, border=0, classes='deg',
+                                           float_format=lambda x: f'{x:.3g}')
+                 + '</details>')
+    return '\n'.join(h)
+
+
 def _load_core_names_map(path):
     """core_names.tsv -> {parent_cluster: cell_type} (only named clusters)."""
     df = _read_tsv_safe(path)
@@ -123,6 +160,7 @@ def build_report(root, output_html=None):
     h.append('<div id="sidebar">')
     h.append('<div class="head">overview</div>')
     h.append('<a href="#overview">Overview</a>')
+    h.append('<a href="#discards">Recommended discards</a>')
     h.append('<div class="head">clusters</div>')
     for cid in cluster_ids:
         nm = core_names.get(str(cid))
@@ -148,6 +186,7 @@ def build_report(root, output_html=None):
     if core_names_html:
         h.append('<div class="cap">canonical-core cell-type names</div>')
         h.append(core_names_html)
+    h.append(_discards_section(root))
 
     # per-cluster
     for cid in cluster_ids:
