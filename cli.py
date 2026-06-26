@@ -90,6 +90,9 @@ def _add_common_run_args(parser):
                       help='Retries (exp backoff + jitter) before fallback. Default: 3.')
     diag.add_argument('--ark-timeout', type=int, default=120,
                       help='Per-call ARK timeout (seconds). Default: 120.')
+    diag.add_argument('--discard-confidence-threshold', type=float, default=0.5,
+                      help='DISCARD calls below this diagnosis confidence are '
+                           'downgraded to UNCERTAIN (kept + flagged). Default: 0.5.')
 
     rerun = parser.add_argument_group('rerun control')
     rerun.add_argument('--force', action='append', default=[],
@@ -156,6 +159,7 @@ def run_cmd(args):
         llm_concurrency=args.llm_concurrency,
         llm_retries=args.llm_retries,
         diagnosis_timeout=args.ark_timeout,
+        discard_confidence_threshold=args.discard_confidence_threshold,
         random_state=args.random_state,
     )
     if not args.no_report:

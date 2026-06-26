@@ -664,6 +664,7 @@ def run_dissect_pipeline(
     n_jobs=8,
     llm_concurrency=8,
     llm_retries=3,
+    discard_confidence_threshold=0.5,
     random_state=0,
 ):
     """Run the full cleanup-diagnosis pipeline into ``<output_dir>/<cluster_col>/``.
@@ -746,6 +747,7 @@ def run_dissect_pipeline(
         fallback_to_rule=diagnosis_fallback_to_rule,
         diagnosis_roles=resolved_roles,
         llm_retries=llm_retries,
+        discard_confidence_threshold=discard_confidence_threshold,
     )
     resolved_markers = load_marker_sets(naming_markers)
     naming_engine = make_naming_engine(
@@ -984,6 +986,7 @@ def run_dissect_pipeline(
         'llm_concurrency': llm_concurrency,
         'llm_retries': llm_retries,
         'diagnosis_timeout': diagnosis_timeout,
+        'discard_confidence_threshold': discard_confidence_threshold,
         'partition_info': partition_info,
     }, default=str, indent=2))
 
