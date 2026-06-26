@@ -52,13 +52,17 @@ _PANEL_COLS = ['parent_cluster', 'subcluster', 'reference_subcluster',
                'top5_up_genes', 'top5_down_genes', 'n_sig_genes',
                'top_sample_enriched', 'top_qc_drift', 'rule_baseline',
                'likely_cause', 'cause_detail', 'diagnosis_confidence',
-               'diagnosis_rationale', 'llm_overrode_rule']
+               'diagnosis_rationale', 'llm_overrode_rule',
+               'disposition_baseline', 'recommended_disposition',
+               'disposition_overridden', 'disposition_reason', 'proposed_cell_type']
 
 _DIAGNOSIS_COLS = ['parent_cluster', 'subcluster', 'reference_subcluster',
                    'minor_umap_label', 'main_umap_label', 'n_cells', 'frac_of_parent',
                    'rule_baseline', 'likely_cause', 'cause_detail',
                    'diagnosis_confidence', 'diagnosis_rationale',
-                   'llm_overrode_rule']
+                   'llm_overrode_rule', 'disposition_baseline',
+                   'recommended_disposition', 'disposition_overridden',
+                   'disposition_reason', 'proposed_cell_type']
 
 
 class _Layout:
@@ -75,6 +79,8 @@ class _Layout:
     def panel(self):         return self.root / 'panel.tsv'
     @property
     def cell_labels(self):   return self.root / 'cell_labels.tsv'
+    @property
+    def discard_cells(self): return self.root / 'discard_cells.tsv'
     @property
     def qc_drift_all(self):  return self.root / 'qc_drift_all.tsv'
     @property
@@ -155,6 +161,48 @@ def _ordered_panel(df: pd.DataFrame) -> pd.DataFrame:
             out[col] = None
     extras = [c for c in out.columns if c not in _PANEL_COLS]
     return out[_PANEL_COLS + extras]
+
+
+_DISCARD_CELL_COLS = ['barcode', 'input_row_index', 'subcluster', 'parent_cluster',
+                      'likely_cause', 'diagnosis_confidence', 'disposition_reason']
+
+
+def _write_cell_dispositions(lay, panel, obs_names):
+    """Join recommended_disposition onto cell_labels.tsv (per cell), and write
+    discard_cells.tsv (DISCARD cells only), keyed by barcode (obs_name) with the
+    0-based row position in the standissect-input adata (from obs_names)."""
+    if not lay.cell_labels.exists():
+        return
+    labels = pd.read_csv(lay.cell_labels, sep='\t', index_col=0)
+    sub = labels['original_cluster_split'].astype(str)
+    if len(panel) and 'subcluster' in panel.columns:
+        p = panel.copy()
+        p['subcluster'] = p['subcluster'].astype(str)
+        p = p.drop_duplicates('subcluster').set_index('subcluster')
+    else:
+        p = pd.DataFrame()
+
+    def col(name):
+        if len(p) and name in p.columns:
+            return sub.map(p[name])
+        return pd.Series([None] * len(labels), index=labels.index)
+
+    labels['recommended_disposition'] = col('recommended_disposition').fillna('')
+    labels.to_csv(lay.cell_labels, sep='\t')
+
+    pos = {str(b): i for i, b in enumerate(obs_names)}
+    mask = (labels['recommended_disposition'] == 'DISCARD').values
+    bc = labels.index[mask]
+    discard = pd.DataFrame({
+        'barcode': bc,
+        'input_row_index': [pos.get(str(b)) for b in bc],
+        'subcluster': sub[mask].values,
+        'parent_cluster': col('parent_cluster')[mask].values,
+        'likely_cause': col('likely_cause')[mask].values,
+        'diagnosis_confidence': col('diagnosis_confidence')[mask].values,
+        'disposition_reason': col('disposition_reason')[mask].values,
+    }, columns=_DISCARD_CELL_COLS)
+    discard.to_csv(lay.discard_cells, sep='\t', index=False)
 
 
 def _as_tuple(value):
@@ -877,6 +925,7 @@ def run_dissect_pipeline(
     panel.to_csv(lay.panel, sep='\t', index=False)
     diag_cols = [c for c in _DIAGNOSIS_COLS if c in panel.columns]
     panel[diag_cols].to_csv(lay.diagnosis_all, sep='\t', index=False)
+    _write_cell_dispositions(lay, panel, adata.obs_names)
     qc_all = _concat_tsvs(lay.clusters.glob('c*/qc_drift_*.tsv'))
     if len(qc_all):
         qc_all.to_csv(lay.qc_drift_all, sep='\t', index=False)
