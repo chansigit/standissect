@@ -285,3 +285,79 @@ def make_naming_engine(*, client=None, markers=None, fallback_to_local=True):
     if client is None:
         return local
     return LLMNamingEngine(client, local=local, fallback_to_local=fallback_to_local)
+
+
+@dataclass
+class ClusterNarrativeEvidence:
+    """Facts for one cluster's narrative — its core identity + minor diagnoses."""
+
+    parent_cluster: str
+    cell_type: str | None = None
+    minors: list[dict] = field(default_factory=list)   # {subcluster, likely_cause, cause_detail, diagnosis_rationale}
+    hint: str = ''
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class ClusterNarrative:
+    """Stable narrative output written to narratives.tsv and narrative.output.json."""
+
+    narrative: str = ''
+    source: str = 'skipped'             # 'llm' | 'skipped'
+    model: str | None = None
+    prompt_version: str = NARRATIVE_PROMPT_VERSION
+    error: str | None = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def to_narrative_row(self, evidence: ClusterNarrativeEvidence) -> dict:
+        return {
+            'parent_cluster': evidence.parent_cluster,
+            'cell_type': evidence.cell_type,
+            'narrative': self.narrative,
+        }
+
+
+def build_narrative_prompt(evidence: ClusterNarrativeEvidence) -> tuple[str, str]:
+    schema = {'narrative': 'one concise paragraph of plain prose'}
+    system = (
+        "Summarize this single-cell cluster for a report using only the supplied "
+        "facts: its core cell-type identity and each minor fragment's diagnosis. "
+        "Write one concise paragraph of plain prose. Do not introduce new cell "
+        "types or causes beyond those supplied. Return strict JSON only."
+    )
+    user = json.dumps({
+        'task': 'narrate_one_cluster',
+        'tissue_hint': evidence.hint,
+        'output_schema': schema,
+        'evidence': evidence.to_dict(),
+    }, ensure_ascii=False, indent=2)
+    return system, user
+
+
+def _narrative_from_dict(data, *, model) -> ClusterNarrative:
+    text = data.get('narrative')
+    if text is None or not str(text).strip():
+        raise ValueError("narrative missing or empty")
+    return ClusterNarrative(narrative=str(text).strip(), source='llm', model=model)
+
+
+class NarrativeEngine:
+    """Evidence-grounded one-paragraph narrative over a chat client. LLM only."""
+
+    def __init__(self, client):
+        self.client = client
+        self.model = getattr(client, 'model', None)
+
+    def narrate(self, evidence: ClusterNarrativeEvidence) -> ClusterNarrative:
+        system, user = build_narrative_prompt(evidence)
+        try:
+            return call_structured(
+                self.client, system, user,
+                lambda data: _narrative_from_dict(data, model=self.model))
+        except Exception as e:
+            return ClusterNarrative(narrative='', source='skipped',
+                                    model=self.model, error=str(e))

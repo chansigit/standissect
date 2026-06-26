@@ -108,3 +108,24 @@ def test_make_naming_engine_selects_local_or_llm():
     assert isinstance(annotate.make_naming_engine(client=None), annotate.LocalNamingEngine)
     eng = annotate.make_naming_engine(client=CallableChatClient(lambda s, u: "{}"))
     assert isinstance(eng, annotate.LLMNamingEngine)
+
+
+def test_narrative_happy():
+    payload = json.dumps({"narrative": "Cluster 0 is a T cell population with a doublet fragment."})
+    eng = annotate.NarrativeEngine(CallableChatClient(lambda s, u: payload, model="m"))
+    ev = annotate.ClusterNarrativeEvidence(
+        parent_cluster="0", cell_type="T cell",
+        minors=[{"subcluster": "c0_1", "likely_cause": "doublet-driven",
+                 "cause_detail": "x", "diagnosis_rationale": "y"}])
+    r = eng.narrate(ev)
+    assert r.source == "llm"
+    assert "T cell" in r.narrative
+    assert r.model == "m"
+
+
+def test_narrative_empty_to_skipped():
+    eng = annotate.NarrativeEngine(CallableChatClient(lambda s, u: json.dumps({"narrative": "  "})))
+    r = eng.narrate(annotate.ClusterNarrativeEvidence(parent_cluster="0"))
+    assert r.source == "skipped"
+    assert r.narrative == ""
+    assert r.error is not None
