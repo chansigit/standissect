@@ -25,3 +25,11 @@ def test_cli_accepts_naming_force_and_annotation_flags():
     assert "naming" in a.force and "narrative" in a.force
     assert a.annotation_hint == "synovial tissue"
     assert a.naming_markers == "m.tsv"
+
+
+def test_cli_accepts_extra_cols():
+    a = build_parser().parse_args(
+        ["run", "x.h5ad", "--cluster-col", "leiden", "--output-dir", "o",
+         "--extra-cat-col", "foo", "--extra-qc-col", "bar"])
+    assert a.extra_cat_col == ["foo"]
+    assert a.extra_qc_col == ["bar"]

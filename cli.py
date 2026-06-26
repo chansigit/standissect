@@ -43,9 +43,9 @@ def _add_common_run_args(parser):
                       help='Continuous detected-feature/gene-count column.')
     meta.add_argument('--umi-count-col',
                       help='Continuous UMI/read-count depth column.')
-    meta.add_argument('--extra-cat-col', action='append', default=(),
+    meta.add_argument('--extra-cat-col', action='append', default=[],
                       help='Additional categorical evidence column. Repeatable.')
-    meta.add_argument('--extra-qc-col', action='append', default=(),
+    meta.add_argument('--extra-qc-col', action='append', default=[],
                       help='Additional continuous QC evidence column. Repeatable.')
 
     tuning = parser.add_argument_group('partition and statistics')
