@@ -69,4 +69,6 @@ def with_retry(fn, *, retries=3, backoff=0.5, jitter=0.25, exceptions=(Exception
             if attempt == retries:
                 break
             time.sleep(backoff * (2 ** attempt) + random.uniform(0, jitter))
+    if last is None:
+        raise RuntimeError("with_retry made no attempt (retries<0 or empty exceptions?)")
     raise last

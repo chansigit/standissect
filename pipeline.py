@@ -218,6 +218,20 @@ def _resolve_metadata_roles(
     return resolved_cat, resolved_qc, role_map
 
 
+def _decat(frame):
+    """Cast all Categorical columns in a DataFrame to object dtype (in-place).
+
+    pandas Categorical raises ``NotImplementedError`` in
+    ``NDArrayBacked.__setstate__`` when an AnnData is unpickled in a spawn
+    worker.  The dissect/persist code only touches obs/var columns via
+    ``.astype(str)``, ``.unique()``, and ``var_names`` — never a ``.cat``
+    accessor — so object dtype is behaviour-preserving.
+    """
+    for _col in frame.columns:
+        if isinstance(frame[_col].dtype, pd.CategoricalDtype):
+            frame[_col] = frame[_col].astype(object)
+
+
 def _write_h5ad_atomic(adata, path):
     """Write an AnnData file via a same-directory temporary file."""
     path = Path(path)
@@ -828,10 +842,6 @@ def run_dissect_pipeline(
         # dissect/persist code reads obs via .astype(str)/.unique() and only
         # touches var through var_names (the index) — never a .cat. accessor —
         # so object dtype is behavior-preserving.
-        def _decat(frame):
-            for _col in frame.columns:
-                if isinstance(frame[_col].dtype, pd.CategoricalDtype):
-                    frame[_col] = frame[_col].astype(object)
         subsets = {}
         for p in todo:
             subset = adata[adata.obs[cluster_col].astype(str) == str(p)].copy()

@@ -43,12 +43,8 @@ def test_subset_categorical_cast_pickles_for_spawn():
     assert raised, "expected NotImplementedError unpickling raw Categorical obs/var"
 
     # apply the same cast the pipeline applies before handing subsets to spawn
-    def _decat(frame):
-        for _col in frame.columns:
-            if isinstance(frame[_col].dtype, pd.CategoricalDtype):
-                frame[_col] = frame[_col].astype(object)
-    _decat(subset.obs)
-    _decat(subset.var)
+    pipeline._decat(subset.obs)
+    pipeline._decat(subset.var)
 
     # now it round-trips, and the categorical columns are plain object dtype
     rt = pickle.loads(pickle.dumps(subset))
@@ -56,4 +52,5 @@ def test_subset_categorical_cast_pickles_for_spawn():
     assert rt.obs['batch'].dtype == object
     assert rt.var['gene_id_harmonized'].dtype == object
     assert list(rt.obs['cluster']) == ['a', 'a', 'b', 'b']
+    assert list(rt.obs['batch']) == ['10X_P7_2', '10X_P7_3', '10X_P7_2', '10X_P7_3']
     assert list(rt.var['gene_id_harmonized']) == ['ENSMUSG1', 'ENSMUSG2', 'ENSMUSG3']

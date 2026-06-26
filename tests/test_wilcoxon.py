@@ -83,3 +83,17 @@ def test_vs_reference_columns_and_topn():
                                 'scores', 'direction']
     assert len(df) == 5
     assert df['scores'].is_monotonic_decreasing
+
+
+def test_kernel_sign_matches_direction():
+    # group 'a' (rows 0..9) high in gene0, low in gene1; 'b' (rows 10..19) opposite
+    dense = np.zeros((20, 2), dtype=np.float32)
+    dense[:10, 0] = 5.0   # gene0 high in a
+    dense[10:, 1] = 5.0   # gene1 high in b
+    labels = np.array(['a'] * 10 + ['b'] * 10)
+    out = cluster._wilcoxon_sparse_stats(dense, labels, ['a', 'b'])
+    za = out['a'][0]
+    assert za[0] > 0      # a is higher in gene0 -> positive z
+    assert za[1] < 0      # a is lower in gene1 -> negative z
+    # mean_in/mean_out track the same direction
+    assert out['a'][1][0] > out['a'][2][0]   # mean_in > mean_out for gene0
