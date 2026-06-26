@@ -169,7 +169,12 @@ When language model-assisted diagnosis is enabled, the model receives only a
 compact JSON evidence packet. This packet contains the minor size, its own
 reference subcluster, top differential-expression rows, composition enrichment
 rows, QC drift rows, cross-major-core context, and, in hybrid mode, the rule
-baseline. The model is not given the raw expression matrix. It must return
+baseline. When an existing cell-type annotation column is supplied
+(`annotation_col`), the packet also carries the per-cell annotation composition
+of the minor fragment and of its reference fragment; the model is instructed to
+treat this as a consistency check on the original labeling rather than as ground
+truth, so it can still flag mislabeled or contaminated fragments. The model is
+not given the raw expression matrix. It must return
 strict JSON containing one allowed `likely_cause`, a short `cause_detail`, a
 confidence score, a rationale, evidence used, alternative causes, recommended
 checks, and an indicator of whether it overrode the rule baseline. If the model

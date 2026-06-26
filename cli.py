@@ -27,6 +27,12 @@ def _add_common_run_args(parser):
                              'path. Off when omitted.')
     parser.add_argument('--umap-key', default='X_umap',
                         help='Embedding key in adata.obsm. Default: X_umap.')
+    parser.add_argument('--annotation-col',
+                        help='Existing cell-type annotation column in adata.obs. When '
+                             'set, each fragment\'s per-cell annotation composition is '
+                             'given to the LLM diagnosis as a consistency-check prior '
+                             '(not blindly trusted). Must already exist in obs. Off '
+                             'when omitted.')
 
     meta = parser.add_argument_group('metadata roles')
     meta.add_argument('--sample-col',
@@ -133,6 +139,7 @@ def run_cmd(args):
         labeled_h5ad_path=args.labeled_h5ad_path,
         apply_discard_path=args.apply_discard,
         umap_key=args.umap_key,
+        annotation_col=_none_if_empty(args.annotation_col),
         sample_col=_none_if_empty(args.sample_col),
         batch_col=_none_if_empty(args.batch_col),
         donor_col=_none_if_empty(args.donor_col),

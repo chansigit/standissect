@@ -609,6 +609,38 @@ def _major_core_comparisons(
     return reference + others[:max_other_cores]
 
 
+def _annotation_composition_for_subcluster(
+    adata, *, subcluster_col, label, annotation_col, max_rows=10,
+):
+    """Existing per-cell annotation composition for one subcluster fragment.
+
+    Returns a list of ``{'annotation', 'n_cells', 'frac'}`` records (descending
+    by count, top ``max_rows``) drawn from ``adata.obs[annotation_col]`` over the
+    cells whose ``subcluster_col`` equals ``label``.  Returns ``[]`` when no
+    annotation column is requested or available — the diagnosis stage may run off
+    persisted artifacts with ``adata=None``, mirroring ``_major_core_comparisons``.
+    """
+    if (adata is None or not annotation_col
+            or subcluster_col not in adata.obs.columns
+            or annotation_col not in adata.obs.columns):
+        return []
+    labels = adata.obs[subcluster_col].astype(str).values
+    mask = labels == str(label)
+    if not mask.any():
+        return []
+    values = adata.obs[annotation_col].astype(str).values[mask]
+    counts = pd.Series(values).value_counts()
+    total = int(counts.sum())
+    rows = []
+    for value, n in counts.head(max_rows).items():
+        rows.append({
+            'annotation': str(value),
+            'n_cells': int(n),
+            'frac': round(float(n) / total, 4) if total else 0.0,
+        })
+    return rows
+
+
 def _diagnosis_output_path(cdir, subcluster):
     return Path(cdir) / f"diagnosis_{safe_subcluster_name(subcluster)}.output.json"
 
@@ -647,6 +679,7 @@ def _apply_diagnosis_to_cluster_panel(
     *,
     adata=None,
     diagnosis_roles=None,
+    annotation_col=None,
     llm_concurrency=1,
 ):
     """Diagnose every minor row in one cluster panel and rewrite the panel."""
@@ -676,10 +709,18 @@ def _apply_diagnosis_to_cluster_panel(
             reference_subcluster=reference_subcluster,
             deg_df=deg_df,
         )
+        minor_annotation = _annotation_composition_for_subcluster(
+            adata, subcluster_col='original_cluster_split', label=subcluster,
+            annotation_col=annotation_col)
+        main_annotation = _annotation_composition_for_subcluster(
+            adata, subcluster_col='original_cluster_split',
+            label=reference_subcluster, annotation_col=annotation_col)
         evidence = build_minor_evidence(
             row_dict, deg_df=deg_df, qc_df=qc_df, composition_frames=comp,
             major_core_comparisons=core_comparisons,
-            diagnosis_roles=diagnosis_roles)
+            diagnosis_roles=diagnosis_roles,
+            annotation_col=annotation_col,
+            minor_annotation=minor_annotation, main_annotation=main_annotation)
         result = engine.diagnose(evidence)
         row_dict.update(result.to_panel_fields())
         write_diagnosis_artifacts(cdir, evidence, result)
@@ -700,6 +741,7 @@ def _run_diagnosis_stage(
     forced,
     adata=None,
     diagnosis_roles=None,
+    annotation_col=None,
     llm_concurrency=1,
 ):
     """Run diagnosis where missing, stale, or explicitly forced."""
@@ -717,6 +759,7 @@ def _run_diagnosis_stage(
             _apply_diagnosis_to_cluster_panel(lay.cluster_dir(p), engine,
                                               adata=adata,
                                               diagnosis_roles=diagnosis_roles,
+                                              annotation_col=annotation_col,
                                               llm_concurrency=llm_concurrency)
     print(f"[pipeline] diagnosis: {len(todo)} clusters computed, "
           f"{len(crosstab.index) - len(todo)} reused", flush=True)
@@ -764,6 +807,7 @@ def run_dissect_pipeline(
     labeled_h5ad_path=None,
     apply_discard_path=None,
     umap_key='X_umap',
+    annotation_col=None,
     cat_cols=None,
     qc_cols=None,
     sample_col=None,
@@ -837,6 +881,9 @@ def run_dissect_pipeline(
                        f"(have: {list(adata.obsm.keys())})")
     if cluster_col not in adata.obs.columns:
         raise KeyError(f"cluster_col '{cluster_col}' not in adata.obs")
+    if annotation_col is not None and annotation_col not in adata.obs.columns:
+        raise KeyError(f"annotation_col '{annotation_col}' not in adata.obs "
+                       f"(have: {list(adata.obs.columns)})")
     force = _normalize_force(force)
     resolved_cat_cols, resolved_qc_cols, resolved_roles = _resolve_metadata_roles(
         cat_cols=cat_cols,
@@ -1003,6 +1050,7 @@ def run_dissect_pipeline(
     skipped += _run_diagnosis_stage(lay, crosstab, diagnosis_engine,
                                     forced=diagnosis_force, adata=adata,
                                     diagnosis_roles=resolved_roles,
+                                    annotation_col=annotation_col,
                                     llm_concurrency=llm_concurrency)
 
     # ---- global panel + qc_drift_all (reassembled from disk) -----------
@@ -1100,6 +1148,7 @@ def run_dissect_pipeline(
     # ---- params.json ---------------------------------------------------
     lay.params.write_text(json.dumps({
         'cluster_col': cluster_col, 'umap_key': umap_key,
+        'annotation_col': annotation_col,
         'cat_cols': list(resolved_cat_cols), 'qc_cols': list(resolved_qc_cols),
         'sample_col': sample_col, 'batch_col': batch_col,
         'donor_col': donor_col, 'library_col': library_col,

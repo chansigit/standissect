@@ -70,6 +70,7 @@ QC/sample columns are optional but are what unlock the per-minor diagnosis.
 |---|---|---|---|
 | 2-D embedding | `adata.obsm[umap_key]` | **yes** — `KeyError` if absent | `umap_key="X_umap"` (default) |
 | existing clustering | `adata.obs[cluster_col]` | **yes** — `KeyError` if absent | `cluster_col="leiden"` |
+| existing cell-type annotation | `adata.obs[annotation_col]` | optional — but if given, **must exist** (`KeyError` otherwise) | `annotation_col="cell_ontology_class"` |
 | categorical cols (composition drift) | `adata.obs[...]` | optional — missing cols silently skipped | `cat_cols=("orig.ident", "batch")` |
 | continuous QC cols (QC drift) | `adata.obs[...]` | optional — missing cols silently skipped | `qc_cols=("percent.mt", "nCount_RNA", "nFeature_RNA", "hybrid_score")` |
 | sample col (anatomy heatmap) | `adata.obs[sample_col]` | optional | `sample_col="orig.ident"` |
@@ -190,6 +191,26 @@ fire for columns named exactly `orig.ident`, `hybrid_score`, `percent.mt`, and
 `nFeature_RNA`. Rename your `obs` columns to match (or pass them under these
 names); otherwise even a clear artifact only ever reaches `biology-candidate` or
 `unclear`.
+
+### Existing annotation as a consistency-check prior (`annotation_col`)
+
+`cluster_col` is the partition you want dissected — it may be numeric Leiden ids
+with no biological meaning. If you *also* have a curated cell-type annotation in
+`obs`, point `--annotation-col` at it. For each minor fragment (and its main /
+reference fragment) standissect then computes the per-cell annotation
+composition (`annotation: n_cells, frac`) and hands it to the **LLM** diagnosis
+as a *consistency check*:
+
+- when a minor fragment's dominant existing annotation differs from its parent
+  or main fragment, that supports `ambient-contamination`, `doublet-driven`, or a
+  genuinely distinct/finer cell type (→ `proposed_cell_type`);
+- the LLM is explicitly told **not to blindly trust** the existing annotation —
+  it is weighed against the DEG/QC/composition evidence and may itself be wrong,
+  so the "catch a mislabel" capability is preserved.
+
+This is **LLM-only** (the rule baseline ignores it). It is optional, but if you
+pass a column name it must already exist in `obs` (otherwise `KeyError`). The
+chosen column is recorded in `params.json` (`annotation_col`).
 
 ## Recommended discards & dispositions
 

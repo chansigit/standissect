@@ -60,3 +60,15 @@ def test_cli_discard_threshold_override():
     a = build_parser().parse_args(["run", "x.h5ad", "--cluster-col", "leiden",
         "--output-dir", "o", "--discard-confidence-threshold", "0.75"])
     assert a.discard_confidence_threshold == 0.75
+
+
+def test_cli_annotation_col_default_none():
+    a = build_parser().parse_args(["run", "x.h5ad", "--cluster-col", "leiden",
+                                   "--output-dir", "o"])
+    assert a.annotation_col is None
+
+
+def test_cli_annotation_col_override():
+    a = build_parser().parse_args(["run", "x.h5ad", "--cluster-col", "leiden",
+        "--output-dir", "o", "--annotation-col", "cell_ontology_class"])
+    assert a.annotation_col == "cell_ontology_class"

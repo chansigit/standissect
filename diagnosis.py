@@ -79,7 +79,7 @@ def derive_disposition(likely_cause, confidence, *, threshold,
                            f"{confidence:.2f} < {threshold:.2f})")
     return final, baseline, (final != baseline), reason
 
-PROMPT_VERSION = 'standissect-diagnosis-v2'
+PROMPT_VERSION = 'standissect-diagnosis-v3'
 DEFAULT_ARK_ENDPOINT = 'https://ark.cn-beijing.volces.com/api/v3/chat/completions'
 DEFAULT_ARK_MODEL = 'ep-20260412124039-zjq7v'
 DEFAULT_DIAGNOSIS_ROLES = {
@@ -129,6 +129,9 @@ class MinorEvidence:
     composition_enrichment: list[dict] = field(default_factory=list)
     qc_drift: list[dict] = field(default_factory=list)
     major_core_comparisons: list[dict] = field(default_factory=list)
+    annotation_col: str | None = None
+    minor_annotation: list[dict] = field(default_factory=list)
+    main_annotation: list[dict] = field(default_factory=list)
     diagnosis_roles: dict = field(default_factory=dict)
     rule_baseline: str | None = None
 
@@ -313,6 +316,9 @@ def build_minor_evidence(
     composition_frames=None,
     major_core_comparisons=None,
     diagnosis_roles=None,
+    annotation_col=None,
+    minor_annotation=None,
+    main_annotation=None,
 ) -> MinorEvidence:
     """Build a compact evidence object from persisted per-minor artifacts."""
     if isinstance(panel_row, pd.Series):
@@ -336,6 +342,9 @@ def build_minor_evidence(
         composition_enrichment=_composition_records(composition_frames),
         qc_drift=_qc_records(qc_df),
         major_core_comparisons=list(major_core_comparisons or []),
+        annotation_col=annotation_col or None,
+        minor_annotation=list(minor_annotation or []),
+        main_annotation=list(main_annotation or []),
         diagnosis_roles=normalize_diagnosis_roles(diagnosis_roles),
     )
     evidence.rule_baseline = RuleDiagnosisEngine(
@@ -598,6 +607,18 @@ DISPOSITION_POLICY = (
     "proposed_cell_type to that cell-type name; otherwise null."
 )
 
+ANNOTATION_POLICY = (
+    "When annotation_col is set, minor_annotation and main_annotation list the "
+    "existing per-cell annotation composition (annotation: n_cells, frac) of the "
+    "minor fragment and of its main/reference fragment, taken from that obs column. "
+    "Use them as a CONSISTENCY CHECK: if the minor fragment's dominant existing "
+    "annotation differs from its parent or its main fragment, that supports "
+    "ambient-contamination, doublet-driven, or a genuinely distinct/finer cell type "
+    "(set proposed_cell_type). Do NOT blindly trust the existing annotation — it may "
+    "itself be wrong; weigh it against the DEG/QC/composition evidence. Ignore when "
+    "both lists are empty (annotation_col not provided)."
+)
+
 
 def build_llm_prompt(evidence: MinorEvidence, *, mode='hybrid') -> tuple[str, str]:
     schema = {
@@ -619,7 +640,9 @@ def build_llm_prompt(evidence: MinorEvidence, *, mode='hybrid') -> tuple[str, st
         "cell types, markers, or experiments. Choose exactly one likely_cause "
         "from the allowed enum, matching species-appropriate gene orthologs. "
         "Set recommended_disposition per disposition_policy: relax toward KEEP "
-        "but NEVER escalate toward DISCARD. Return strict JSON only."
+        "but NEVER escalate toward DISCARD. Cross-check the existing annotation "
+        "(annotation_col) per annotation_policy without blindly trusting it. "
+        "Return strict JSON only."
     )
     user = json.dumps({
         'task': 'diagnose_one_minor_fragment',
@@ -627,6 +650,7 @@ def build_llm_prompt(evidence: MinorEvidence, *, mode='hybrid') -> tuple[str, st
         'allowed_likely_cause': list(ALLOWED_CAUSES),
         'cause_signatures': CAUSE_SIGNATURES,
         'disposition_policy': DISPOSITION_POLICY,
+        'annotation_policy': ANNOTATION_POLICY,
         'output_schema': schema,
         'evidence': evidence.to_dict(),
     }, ensure_ascii=False, indent=2)

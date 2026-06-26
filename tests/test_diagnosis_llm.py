@@ -176,3 +176,49 @@ def test_llm_relaxation_through_parse_layer_beats_post_init_default():
     r = parse_llm_result(payload, rule_baseline=None, mode="llm", model=None)
     assert r.recommended_disposition == "UNCERTAIN"
     assert r.disposition_overridden is True
+
+
+def test_build_minor_evidence_carries_annotation_composition():
+    from diagnosis import build_minor_evidence
+    minor = [{"annotation": "B cell", "n_cells": 8, "frac": 0.8},
+             {"annotation": "T cell", "n_cells": 2, "frac": 0.2}]
+    main = [{"annotation": "macrophage", "n_cells": 50, "frac": 1.0}]
+    ev = build_minor_evidence(
+        {"parent_cluster": "macrophage", "subcluster": "c3_1",
+         "reference_subcluster": "c3_0", "minor_umap_label": "u1",
+         "main_umap_label": "u0", "n_cells": 10, "frac_of_parent": 0.17},
+        annotation_col="cell_ontology_class",
+        minor_annotation=minor, main_annotation=main)
+    d = ev.to_dict()
+    assert d["annotation_col"] == "cell_ontology_class"
+    assert d["minor_annotation"] == minor
+    assert d["main_annotation"] == main
+
+
+def test_prompt_includes_annotation_policy_and_composition():
+    from diagnosis import build_llm_prompt, MinorEvidence
+    ev = MinorEvidence(
+        parent_cluster="macrophage", subcluster="c3_1",
+        reference_subcluster="c3_0", minor_umap_label="u1", main_umap_label="u0",
+        n_cells=10, frac_of_parent=0.17, annotation_col="cell_ontology_class",
+        minor_annotation=[{"annotation": "B cell", "n_cells": 8, "frac": 0.8}],
+        main_annotation=[{"annotation": "macrophage", "n_cells": 50, "frac": 1.0}])
+    system, user = build_llm_prompt(ev, mode="llm")
+    assert "annotation_policy" in user
+    assert "minor_annotation" in user and "main_annotation" in user
+    assert "B cell" in user
+    # framing must be consistency-check, never blind trust
+    assert "blindly trust" in (system + user).lower()
+
+
+def test_prompt_annotation_fields_empty_when_col_absent():
+    import json as _json
+    from diagnosis import build_llm_prompt, MinorEvidence
+    ev = MinorEvidence(parent_cluster="0", subcluster="c0_1",
+                       reference_subcluster="c0_0", minor_umap_label="u1",
+                       main_umap_label="u0", n_cells=10, frac_of_parent=0.1)
+    _system, user = build_llm_prompt(ev, mode="llm")
+    ev_payload = _json.loads(user)["evidence"]
+    assert ev_payload["annotation_col"] is None
+    assert ev_payload["minor_annotation"] == []
+    assert ev_payload["main_annotation"] == []
