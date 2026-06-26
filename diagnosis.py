@@ -17,6 +17,11 @@ try:                                    # package use (standissect.diagnosis)
 except ImportError:                     # standalone use (tests import top-level `diagnosis`)
     from llm_client import OpenAICompatClient, call_structured, extract_json, LLMUnavailable
 
+try:                                    # package use
+    from .parallel import with_retry
+except ImportError:                     # standalone use
+    from parallel import with_retry
+
 import numpy as np
 import pandas as pd
 
@@ -420,14 +425,14 @@ class ArkChatClient(OpenAICompatClient):
     (temperature=0). `endpoint` may be a full /chat/completions URL."""
 
     def __init__(self, *, api_key, model=DEFAULT_ARK_MODEL,
-                 endpoint=DEFAULT_ARK_ENDPOINT, timeout=60):
+                 endpoint=DEFAULT_ARK_ENDPOINT, timeout=120):
         if not api_key:
             raise ValueError("ArkChatClient requires a non-empty api_key")
         super().__init__(endpoint, api_key, model, timeout=timeout, temperature=0)
 
     @classmethod
     def from_env(cls, *, api_key_env="ARK_API_KEY", model=DEFAULT_ARK_MODEL,
-                 endpoint=DEFAULT_ARK_ENDPOINT, timeout=60):
+                 endpoint=DEFAULT_ARK_ENDPOINT, timeout=120):
         api_key = os.environ.get(api_key_env)
         if not api_key:
             raise ValueError(f"environment variable {api_key_env!r} is not set")
@@ -440,13 +445,14 @@ class LLMDiagnosisEngine:
     mode = 'llm'
 
     def __init__(self, client, *, mode='llm', fallback_to_rule=True,
-                 diagnosis_roles=None):
+                 diagnosis_roles=None, llm_retries=3):
         self.client = client
         self.mode = mode
         self.fallback_to_rule = fallback_to_rule
         self.diagnosis_roles = normalize_diagnosis_roles(diagnosis_roles)
         self.rule_engine = RuleDiagnosisEngine(self.diagnosis_roles)
         self.model = getattr(client, 'model', None)
+        self.llm_retries = llm_retries
 
     def diagnose(self, evidence: MinorEvidence) -> DiagnosisResult:
         if not evidence.diagnosis_roles:
@@ -455,11 +461,14 @@ class LLMDiagnosisEngine:
         evidence.rule_baseline = baseline.likely_cause if self.mode == 'hybrid' else None
         system_prompt, user_prompt = build_llm_prompt(evidence, mode=self.mode)
         try:
-            return call_structured(
-                self.client, system_prompt, user_prompt,
-                lambda data: _diagnosis_from_dict(
-                    data, rule_baseline=evidence.rule_baseline,
-                    mode=self.mode, model=self.model))
+            return with_retry(
+                lambda: call_structured(
+                    self.client, system_prompt, user_prompt,
+                    lambda data: _diagnosis_from_dict(
+                        data, rule_baseline=evidence.rule_baseline,
+                        mode=self.mode, model=self.model)),
+                retries=self.llm_retries, backoff=0.5, jitter=0.25,
+                exceptions=(Exception,))
         except Exception as e:
             if not self.fallback_to_rule:
                 raise
@@ -539,7 +548,7 @@ def make_chat_client(
     ark_api_key_env: str = 'ARK_API_KEY',
     ark_model: str = DEFAULT_ARK_MODEL,
     ark_endpoint: str = DEFAULT_ARK_ENDPOINT,
-    timeout: int = 60,
+    timeout: int = 120,
 ):
     """Build a chat client for LLM modes, or return ``None``.
 
@@ -569,9 +578,10 @@ def make_diagnosis_engine(
     ark_api_key_env: str = 'ARK_API_KEY',
     ark_model: str = DEFAULT_ARK_MODEL,
     ark_endpoint: str = DEFAULT_ARK_ENDPOINT,
-    timeout: int = 60,
+    timeout: int = 120,
     fallback_to_rule: bool = True,
     diagnosis_roles=None,
+    llm_retries: int = 3,
 ):
     """Create the requested diagnosis engine.
 
@@ -596,7 +606,7 @@ def make_diagnosis_engine(
         )
     return LLMDiagnosisEngine(
         client, mode=mode, fallback_to_rule=fallback_to_rule,
-        diagnosis_roles=diagnosis_roles)
+        diagnosis_roles=diagnosis_roles, llm_retries=llm_retries)
 
 
 def safe_subcluster_name(name: str) -> str:

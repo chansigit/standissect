@@ -202,3 +202,17 @@ def test_run_narrative_stage_writes_and_is_idempotent(tmp_path):
         clusters_dir=clusters, core_names_path=core_names, narratives_path=narr,
         parents=["0"], engine=eng, forced=False)
     assert sk2 == ["narrative:c0"]
+
+
+def test_naming_retries_then_succeeds():
+    calls = {"n": 0}
+    def flaky(s, u):
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise TimeoutError("read timeout")
+        return json.dumps({"cell_type": "T cell", "confidence": 0.9, "rationale": "r",
+                           "markers_used": ["CD3D"]})
+    eng = annotate.LLMNamingEngine(CallableChatClient(flaky, model="m"), llm_retries=3)
+    r = eng.name(_evi(["CD3D", "CD3E"]))
+    assert r.source == "llm" and r.cell_type == "T cell"
+    assert calls["n"] == 2

@@ -23,6 +23,11 @@ try:                                    # package use (standissect.annotate)
 except ImportError:                     # standalone use (tests import top-level)
     from llm_client import call_structured
 
+try:                                    # package use
+    from .parallel import with_retry
+except ImportError:                     # standalone use
+    from parallel import with_retry
+
 import pandas as pd
 
 
@@ -254,18 +259,22 @@ class LLMNamingEngine:
     source = 'llm'
 
     def __init__(self, client, *, local: 'LocalNamingEngine | None' = None,
-                 fallback_to_local: bool = True):
+                 fallback_to_local: bool = True, llm_retries: int = 3):
         self.client = client
         self.local = local
         self.fallback_to_local = fallback_to_local
         self.model = getattr(client, 'model', None)
+        self.llm_retries = llm_retries
 
     def name(self, evidence: CoreEvidence) -> CoreNaming:
         system, user = build_core_naming_prompt(evidence)
         try:
-            return call_structured(
-                self.client, system, user,
-                lambda data: _core_naming_from_dict(data, evidence, model=self.model))
+            return with_retry(
+                lambda: call_structured(
+                    self.client, system, user,
+                    lambda data: _core_naming_from_dict(data, evidence, model=self.model)),
+                retries=self.llm_retries, backoff=0.5, jitter=0.25,
+                exceptions=(Exception,))
         except Exception as e:
             if self.local is not None and self.fallback_to_local:
                 result = self.local.name(evidence)
@@ -276,7 +285,8 @@ class LLMNamingEngine:
                               model=self.model, error=str(e))
 
 
-def make_naming_engine(*, client=None, markers=None, fallback_to_local=True):
+def make_naming_engine(*, client=None, markers=None, fallback_to_local=True,
+                       llm_retries: int = 3):
     """LLM primary + local backup when a client exists, else local-only.
 
     Naming therefore always produces a result.
@@ -284,7 +294,8 @@ def make_naming_engine(*, client=None, markers=None, fallback_to_local=True):
     local = LocalNamingEngine(markers)
     if client is None:
         return local
-    return LLMNamingEngine(client, local=local, fallback_to_local=fallback_to_local)
+    return LLMNamingEngine(client, local=local, fallback_to_local=fallback_to_local,
+                           llm_retries=llm_retries)
 
 
 @dataclass
@@ -348,16 +359,20 @@ def _narrative_from_dict(data, *, model) -> ClusterNarrative:
 class NarrativeEngine:
     """Evidence-grounded one-paragraph narrative over a chat client. LLM only."""
 
-    def __init__(self, client):
+    def __init__(self, client, *, llm_retries: int = 3):
         self.client = client
         self.model = getattr(client, 'model', None)
+        self.llm_retries = llm_retries
 
     def narrate(self, evidence: ClusterNarrativeEvidence) -> ClusterNarrative:
         system, user = build_narrative_prompt(evidence)
         try:
-            return call_structured(
-                self.client, system, user,
-                lambda data: _narrative_from_dict(data, model=self.model))
+            return with_retry(
+                lambda: call_structured(
+                    self.client, system, user,
+                    lambda data: _narrative_from_dict(data, model=self.model)),
+                retries=self.llm_retries, backoff=0.5, jitter=0.25,
+                exceptions=(Exception,))
         except Exception as e:
             return ClusterNarrative(narrative='', source='skipped',
                                     model=self.model, error=str(e))

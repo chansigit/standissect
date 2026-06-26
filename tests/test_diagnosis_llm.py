@@ -75,3 +75,34 @@ def test_make_diagnosis_engine_still_raises_on_llm_without_key(monkeypatch):
     monkeypatch.delenv("ARK_API_KEY", raising=False)
     with pytest.raises(ValueError):
         make_diagnosis_engine(mode="llm")
+
+
+def test_diagnosis_retries_then_succeeds():
+    calls = {"n": 0}
+    def flaky(s, u):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise TimeoutError("read timeout")
+        return json.dumps({"likely_cause": ALLOWED_CAUSES[0], "confidence": 0.7,
+                           "rationale": "r"})
+    from diagnosis import LLMDiagnosisEngine, MinorEvidence
+    eng = LLMDiagnosisEngine(CallableChatClient(flaky, model="m"), mode="llm",
+                             llm_retries=3)
+    r = eng.diagnose(MinorEvidence(parent_cluster="0", subcluster="c0_1",
+                     reference_subcluster="c0_0", minor_umap_label="u1",
+                     main_umap_label="u0", n_cells=10, frac_of_parent=0.1))
+    assert r.diagnosis_source == "llm"
+    assert calls["n"] == 3
+
+
+def test_diagnosis_retry_exhaustion_falls_back_to_rule():
+    def always_timeout(s, u):
+        raise TimeoutError("read timeout")
+    from diagnosis import LLMDiagnosisEngine, MinorEvidence
+    eng = LLMDiagnosisEngine(CallableChatClient(always_timeout, model="m"), mode="llm",
+                             llm_retries=2)
+    r = eng.diagnose(MinorEvidence(parent_cluster="0", subcluster="c0_1",
+                     reference_subcluster="c0_0", minor_umap_label="u1",
+                     main_umap_label="u0", n_cells=10, frac_of_parent=0.1))
+    assert r.diagnosis_source == "rule-fallback"
+    assert r.error is not None
