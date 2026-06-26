@@ -6,13 +6,16 @@ tree, with file-existence idempotency. The analysis primitives live in
 ``standissect.cluster`` and the interpretation layer lives in
 ``standissect.diagnosis``.
 
-The stages run serially and memory-bounded — the canonical-core Wilcoxon is
-gene-chunked to stay within a modest memory budget; the per-minor DEG is a
-vectorised in-process Mann-Whitney. Process-pool parallelism was tried and
-dropped (a fork pool deadlocks after heavy threaded-BLAS use).
+The per-cluster DEG stage (Stage 2) is parallelised across clusters using a
+spawn ProcessPoolExecutor (via ``parallel.process_map``).  Each worker receives
+a materialised AnnData copy of one parent cluster's cells so no view reference
+to the full adata is serialised.  On any pool-level failure the stage falls
+back to serial execution.  ``n_jobs`` controls the worker count (capped by
+``os.cpu_count()`` and the number of clusters to process).
 """
 from __future__ import annotations
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -20,7 +23,7 @@ import pandas as pd
 
 from .cluster import (umap_leiden_partition, dissect_one_cluster,
                       canonical_marker_deg, plot_minor_profile)
-from .parallel import thread_map
+from .parallel import thread_map, process_map
 from .diagnosis import (
     DEFAULT_ARK_ENDPOINT,
     DEFAULT_ARK_MODEL,
@@ -571,18 +574,15 @@ def _run_diagnosis_stage(
     return [f'diagnosis:c{p}' for p in crosstab.index if p not in set(todo)]
 
 
-# _dissect_one bundles "dissect one cluster + persist it"; the heavy shared
-# inputs (adata, crosstab, ...) are passed through this module-level slot
-# rather than threaded through every call.
-_DISSECT_CTX: dict | None = None
+def _dissect_one_subset(parent, subset, ctx):
+    """Dissect + persist one cluster; pure function — no module global.
 
-
-def _dissect_one(parent):
-    """Dissect + persist one cluster, reading shared inputs from ``_DISSECT_CTX``."""
-    ctx = _DISSECT_CTX
-    assert ctx is not None, "_DISSECT_CTX must be set before _dissect_one is called"
+    ``subset`` is a materialised AnnData copy (not a view) of this parent's
+    cells.  ``ctx`` is a plain dict of scalars/DataFrames/Paths (no full adata)
+    and is therefore safe to pickle for spawn workers.
+    """
     res = dissect_one_cluster(
-        ctx['adata'], cluster_col=ctx['cluster_col'], parent=str(parent),
+        subset, cluster_col=ctx['cluster_col'], parent=str(parent),
         umap_label_col=ctx['umap_label_col'],
         crosstab_row=ctx['crosstab'].loc[parent],
         size_rank_name=ctx['srn_by_parent'][parent],
@@ -590,10 +590,21 @@ def _dissect_one(parent):
         top_n_deg=ctx['top_n_deg'], deg_layer=ctx['deg_layer'],
         min_subcluster_size=ctx['min_subcluster_size'],
     )
-    _persist_cluster(ctx['adata'], res, cdir=ctx['lay'].cluster_dir(parent),
+    _persist_cluster(subset, res, cdir=ctx['lay'].cluster_dir(parent),
                      umap_key=ctx['umap_key'], cluster_col=ctx['cluster_col'],
                      size_rank_name=ctx['srn_by_parent'][parent])
     return str(parent)
+
+
+def _dissect_task(args):
+    """Top-level picklable task wrapper for the spawn ProcessPool.
+
+    Must be a module-level function (not a closure) so ``pickle`` can locate it
+    by qualified name when serialising the callable to the worker process.
+    Unpacks ``(parent, subset, ctx)`` → ``_dissect_one_subset``.
+    """
+    parent, subset, ctx = args
+    return _dissect_one_subset(parent, subset, ctx)
 
 
 def run_dissect_pipeline(
@@ -662,8 +673,9 @@ def run_dissect_pipeline(
     ``feature_count_col`` and ``umi_count_col``. ``cat_cols`` and ``qc_cols`` are
     retained as compatibility escape hatches for extra evidence columns.
 
-    Stages run serially; canonical-core Wilcoxon is gene-chunked to bound memory.
-    ``n_jobs`` is currently unused (reserved).
+    Stages run serially except the DEG dissect stage, which fans out across
+    spawn workers — one worker per parent cluster, bounded by ``n_jobs`` and
+    ``os.cpu_count()``.  Canonical-core Wilcoxon is gene-chunked to bound memory.
 
     Returns ``{'root', 'crosstab', 'panel', 'partition_info', 'canonical_deg',
     'skipped'}``.
@@ -788,27 +800,36 @@ def run_dissect_pipeline(
 
     crosstab.to_csv(lay.crosstab, sep='\t')
 
-    # ---- STAGE 2: per-cluster dissect (serial) ------------------------
+    # ---- STAGE 2: per-cluster dissect (parallel across clusters) -------
     dissect_force = part_force or ('dissect' in force)
     todo = [p for p in crosstab.index
             if not _skip(lay.cluster_panel(p), dissect_force)]
     todo_set = set(todo)
     skipped += [f'dissect:c{p}' for p in crosstab.index if p not in todo_set]
     if todo:
-        global _DISSECT_CTX
-        _DISSECT_CTX = {
-            'adata': adata, 'cluster_col': cluster_col,
+        # ctx holds only picklable scalars/DataFrames/Paths — no full adata.
+        ctx = {
+            'cluster_col': cluster_col,
             'umap_label_col': umap_label_col, 'crosstab': crosstab,
             'srn_by_parent': srn_by_parent, 'cat_cols': resolved_cat_cols,
             'qc_cols': resolved_qc_cols, 'top_n_deg': top_n_deg, 'deg_layer': deg_layer,
             'min_subcluster_size': min_subcluster_size, 'umap_key': umap_key,
             'lay': lay,
         }
+        # Materialise each subset with .copy() so the spawn worker receives a
+        # standalone AnnData (not a view) — a view retains a reference to the
+        # full parent adata, which would be serialised in its entirety.
+        subsets = {p: adata[adata.obs[cluster_col].astype(str) == str(p)].copy()
+                   for p in todo}
+        deg_jobs = max(1, min(len(todo), os.cpu_count() or 1, n_jobs))
         try:
+            process_map(_dissect_task, [(p, subsets[p], ctx) for p in todo],
+                        max_workers=deg_jobs)
+        except Exception as exc:
+            print(f"[pipeline] dissect process pool failed ({exc}); "
+                  f"recomputing serially", flush=True)
             for p in todo:
-                _dissect_one(p)
-        finally:
-            _DISSECT_CTX = None
+                _dissect_one_subset(p, subsets[p], ctx)
     print(f"[pipeline] dissect: {len(todo)} clusters computed, "
           f"{len(crosstab.index) - len(todo)} reused", flush=True)
 
