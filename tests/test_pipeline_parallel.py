@@ -115,3 +115,37 @@ def test_run_dissect_pipeline_rejects_missing_annotation_col(tmp_path):
         pipeline.run_dissect_pipeline(
             adata, cluster_col='leiden', output_dir=str(tmp_path),
             annotation_col='does_not_exist')
+
+
+def test_annotation_composition_skips_blank_and_nan():
+    import numpy as np
+    import pandas as pd
+    import anndata as ad
+    obs = pd.DataFrame({
+        'original_cluster_split': ['c1_1'] * 5,
+        # 2 real "B cell", then blank, whitespace-only, and NaN (all noise)
+        'free_annotation': ['B cell', 'B cell', '', '  ', np.nan],
+    })
+    adata = ad.AnnData(X=np.zeros((5, 2), dtype=np.float32), obs=obs)
+    comp = pipeline._annotation_composition_for_subcluster(
+        adata, subcluster_col='original_cluster_split', label='c1_1',
+        annotation_col='free_annotation')
+    # only the real label survives; frac is over the FULL fragment (5 cells),
+    # so it honestly reflects that 2/5 are annotated.
+    assert comp == [{'annotation': 'B cell', 'n_cells': 2, 'frac': 0.4}]
+
+
+def test_annotation_composition_all_blank_is_empty():
+    import numpy as np
+    import pandas as pd
+    import anndata as ad
+    obs = pd.DataFrame({
+        'original_cluster_split': ['c1_0'] * 3,
+        'free_annotation': ['', '   ', np.nan],
+    })
+    adata = ad.AnnData(X=np.zeros((3, 2), dtype=np.float32), obs=obs)
+    # all blank/NaN -> [] so the LLM "ignore when empty" policy path fires
+    # (regression for the real Marrow e2e: free_annotation was blank).
+    assert pipeline._annotation_composition_for_subcluster(
+        adata, subcluster_col='original_cluster_split', label='c1_0',
+        annotation_col='free_annotation') == []

@@ -630,14 +630,19 @@ def _annotation_composition_for_subcluster(
         return []
     values = adata.obs[annotation_col].astype(str).values[mask]
     counts = pd.Series(values).value_counts()
-    total = int(counts.sum())
+    total = int(counts.sum())  # all cells in the fragment, incl. unannotated
     rows = []
-    for value, n in counts.head(max_rows).items():
+    for value, n in counts.items():
+        label = str(value).strip()
+        if not label or label.lower() == 'nan':
+            continue  # blank / NaN cells carry no annotation — skip as noise
         rows.append({
-            'annotation': str(value),
+            'annotation': label,
             'n_cells': int(n),
             'frac': round(float(n) / total, 4) if total else 0.0,
         })
+        if len(rows) >= max_rows:
+            break
     return rows
 
 
