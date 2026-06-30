@@ -1,4 +1,61 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><title>standissect review</title></head>
-<body><p>standissect review — placeholder (full UI pending)</p>
-<script src="/static/app.js"></script></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>standissect review</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/plotly.min.js"></script>
+</head>
+<body>
+  <div id="topbar">
+    <span class="brand">standissect&nbsp;review</span>
+    <span id="runroot" class="runroot"></span>
+    <span class="spacer"></span>
+    <div id="viewtoggle" class="toggle">
+      <button data-view="dashboard" class="active">Dashboard</button>
+      <button data-view="umap" id="umapBtn" hidden>Interactive UMAP</button>
+    </div>
+    <span id="progress" class="progress"></span>
+  </div>
+
+  <div id="sidebar"></div>
+
+  <div id="main">
+    <!-- dashboard view -->
+    <div id="dashboard"></div>
+
+    <!-- umap view -->
+    <div id="umapview" hidden>
+      <div class="umapbar">
+        <label>Cluster focus:
+          <select id="focusSelect"></select>
+        </label>
+        <label>Minor:
+          <select id="minorSelect"></select>
+        </label>
+        <span class="hint">Use the lasso / box tool (top-right of the plot) to select cells.</span>
+      </div>
+      <div id="umap"></div>
+    </div>
+  </div>
+
+  <!-- selection panel (umap) -->
+  <div id="selpanel" hidden>
+    <div class="selhead">
+      <b>Selection</b> <span id="selcount"></span>
+      <button class="x" onclick="closeSel()">×</button>
+    </div>
+    <div id="selstats"></div>
+    <div class="selactions">
+      <button onclick="exportSel()">Export barcodes</button>
+      <button class="discard" onclick="manualSel('DISCARD')">Manual DISCARD</button>
+      <button class="keep" onclick="manualSel('KEEP')">Manual KEEP</button>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
