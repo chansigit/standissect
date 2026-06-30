@@ -419,6 +419,40 @@ ssh -N -L 8050:<compute-node>:8050 chensj16@login.sherlock.stanford.edu
 barcode lists). These are decisions only — nothing is deleted; feed them into
 your own `--apply-discard` step if you want a cleaned `.h5ad`.
 
+### Worked example — ts-blood (Sherlock)
+
+Concrete commands for the ts-blood dataset. Input
+`…_filtered.h5ad` has `harmony_leiden` (clusters) + `X_umap_harmony` (embedding)
++ the QC/annotation columns. Run on a compute node (`sh_dev`/bigmem); LLM
+diagnosis needs `ARK_API_KEY` (already in `~/.bashrc`). The dissect tree gets
+cleaned periodically, so step 1 regenerates it.
+
+```bash
+cd /scratch/users/chensj16/projects                 # parent of standissect/
+H5AD=/scratch/users/chensj16/sc-curation-output/ts-blood/Blood_TSP1_30_version2d_10X_smartseq_scvi_Nov122024_filtered.h5ad
+RUN=/scratch/users/chensj16/sc-curation-output/ts-blood/dissect/harmony_leiden
+
+# 1. (re)build the dissect tree — heavy: DEG + per-minor LLM diagnosis (idempotent)
+python -m standissect run "$H5AD" \
+    --cluster-col harmony_leiden --output-dir "$RUN" \
+    --umap-key X_umap_harmony --annotation-col cell_type_fine \
+    --sample-col sample --donor-col donor \
+    --doublet-score-col doublet_score --mito-col pct_counts_mt \
+    --feature-count-col n_genes_by_counts --umi-count-col total_counts \
+    --resolution 0.5 --min-subcluster-size 50 \
+    --diagnosis-mode llm --discard-confidence-threshold 0.5
+
+# 2. export per-cell UMAP coordinates for the interactive UMAP
+python -m standissect export-coords "$H5AD" --output-dir "$RUN" \
+    --umap-key X_umap_harmony \
+    --doublet-score-col doublet_score --mito-col pct_counts_mt \
+    --feature-count-col n_genes_by_counts --umi-count-col total_counts
+
+# 3. launch the review server (idempotent restart), then expose via ngrok
+python -m standissect serve "$RUN" --port 8050 &
+ngrok http --basic-auth "user:reviewpass1" 8050
+```
+
 ## Modules
 
 | module | role |
