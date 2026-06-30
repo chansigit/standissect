@@ -658,8 +658,40 @@ async function manualSel(disp) {
 // Compute runs Mann-Whitney server-side.
 function openDeg() {
   if (!(STATE.run && STATE.run.deg_enabled)) return;
-  document.getElementById("degpanel").hidden = false;
+  const p = document.getElementById("degpanel");
+  p.hidden = false;
+  if (!p.dataset.placed) {                          // first open: place + make draggable
+    p.dataset.placed = "1";
+    p.style.bottom = "auto";
+    p.style.left = "20px";
+    p.style.height = Math.min(window.innerHeight * 0.7, 520) + "px";   // explicit -> resizable
+    p.style.top = Math.max(64, window.innerHeight - p.offsetHeight - 24) + "px";
+    _makeDegDraggable(p);
+  }
   _syncDegbar();
+}
+
+// drag the header to move the panel (native CSS resize:both handles the size).
+function _makeDegDraggable(p) {
+  const head = p.querySelector(".sel-head");
+  if (!head) return;
+  head.style.cursor = "move";
+  head.addEventListener("mousedown", e => {
+    if (e.target.closest(".sel-x")) return;         // not when hitting the close ×
+    e.preventDefault();
+    const r = p.getBoundingClientRect();
+    const ox = e.clientX - r.left, oy = e.clientY - r.top;
+    const move = ev => {
+      p.style.left = Math.max(0, Math.min(window.innerWidth - 60, ev.clientX - ox)) + "px";
+      p.style.top = Math.max(0, Math.min(window.innerHeight - 30, ev.clientY - oy)) + "px";
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  });
 }
 
 function closeDeg() {
@@ -670,7 +702,10 @@ function closeDeg() {
 
 function armDeg(which) {
   STATE.degArm = which;
-  _setArmedUI();
+  if (which === "a") STATE.degA = null; else STATE.degB = null;   // re-picking this group
+  const gd = document.getElementById("umap");                     // wipe the prior lasso/highlight
+  if (gd && gd.data) Plotly.restyle(gd, {selectedpoints: [null, null]});
+  _syncDegbar();
   const h = document.getElementById("degHint");
   if (h) h.textContent = `now lasso group ${which.toUpperCase()} on the UMAP (hold Shift + drag).`;
 }
@@ -704,7 +739,8 @@ function clearDeg() {
 async function computeDeg() {
   if (!STATE.degA || !STATE.degB) return;
   const res = document.getElementById("degResult");
-  res.innerHTML = "<p class='muted'>computing DEG…</p>";
+  res.innerHTML = "<p class='muted'>computing DEG"
+    + "<span class='dot-anim'><span>.</span><span>.</span><span>.</span></span></p>";
   try {
     const d = await api("/api/deg", {method: "POST",
       headers: {"Content-Type": "application/json"},
