@@ -421,38 +421,55 @@ your own `--apply-discard` step if you want a cleaned `.h5ad`.
 
 ### Worked example — ts-blood (Sherlock)
 
-Concrete commands for the ts-blood dataset. Input
-`…_filtered.h5ad` has `harmony_leiden` (clusters) + `X_umap_harmony` (embedding)
-+ the QC/annotation columns. Run on a compute node (`sh_dev`/bigmem); LLM
-diagnosis needs `ARK_API_KEY` (already in `~/.bashrc`). The dissect tree gets
-cleaned periodically, so step 1 regenerates it.
+Concrete commands for the ts-blood dataset. The scvi-curated `…_filtered.h5ad`
+carries scvi clusterings (`scvi_leiden_donorassay_full`, `scvi_leiden_res05_tissue`)
+with matching integrated UMAPs (`X_umap_scvi_full_donorassay`,
+`X_umap_tissue_scvi_donorassay`) plus the QC/annotation columns — always check
+`params.json` (or `standissect columns "$H5AD"`) for what your copy actually has,
+since the curation file is periodically regenerated and embedding/cluster keys
+can change (an earlier copy had `harmony_leiden` / `X_umap_harmony`; it does
+not anymore). Run on a compute node (`sh_dev`/bigmem); LLM diagnosis needs
+`ARK_API_KEY` (already in `~/.bashrc`). The dissect tree gets cleaned
+periodically, so step 1 regenerates it.
+
+`RUN` is the **parent** output dir; `run` appends `<cluster_col>`, so the tree —
+and therefore the `export-coords --output-dir` and `serve` root — is `$RUN/$CCOL`.
 
 ```bash
 cd /scratch/users/chensj16/projects                 # parent of standissect/
 H5AD=/scratch/users/chensj16/sc-curation-output/ts-blood/Blood_TSP1_30_version2d_10X_smartseq_scvi_Nov122024_filtered.h5ad
-RUN=/scratch/users/chensj16/sc-curation-output/ts-blood/dissect/harmony_leiden
+RUN=/scratch/users/chensj16/sc-curation-output/ts-blood/dissect   # parent; `run` appends <cluster_col>
+CCOL=scvi_leiden_donorassay_full                    # tree lands in $RUN/$CCOL
 
 # 1. (re)build the dissect tree — heavy: DEG + per-minor LLM diagnosis (idempotent)
 python -m standissect run "$H5AD" \
-    --cluster-col harmony_leiden --output-dir "$RUN" \
-    --umap-key X_umap_harmony --annotation-col cell_type_fine \
+    --cluster-col "$CCOL" --output-dir "$RUN" \
+    --umap-key X_umap_scvi_full_donorassay --annotation-col cell_type_fine \
     --sample-col sample --donor-col donor \
-    --doublet-score-col doublet_score --mito-col pct_counts_mt \
+    --mito-col pct_counts_mt \
     --feature-count-col n_genes_by_counts --umi-count-col total_counts \
     --resolution 0.5 --min-subcluster-size 0 \
-    --diagnosis-mode llm --discard-confidence-threshold 0.5
+    --diagnosis-mode llm --llm-concurrency 24 --discard-confidence-threshold 0.5
     # --min-subcluster-size 0 = diagnose every off-core fragment (no size floor)
+    # --llm-concurrency 24    = all minors share one global pool; tune to your ARK quota
 
-# 2. export per-cell UMAP coordinates for the interactive UMAP
-python -m standissect export-coords "$H5AD" --output-dir "$RUN" \
-    --umap-key X_umap_harmony \
-    --doublet-score-col doublet_score --mito-col pct_counts_mt \
+# 2. export per-cell UMAP coords for the interactive UMAP (into the tree root $RUN/$CCOL)
+python -m standissect export-coords "$H5AD" --output-dir "$RUN/$CCOL" \
+    --umap-key X_umap_scvi_full_donorassay \
+    --mito-col pct_counts_mt \
     --feature-count-col n_genes_by_counts --umi-count-col total_counts
 
 # 3. launch the review server (idempotent restart), then expose via ngrok
-python -m standissect serve "$RUN" --port 8050 &
+python -m standissect serve "$RUN/$CCOL" --port 8050 &
 ngrok http --basic-auth "user:reviewpass1" 8050
 ```
+
+> Reviewing an **existing** tree whose source `.h5ad` lost its original
+> embedding? Any integrated UMAP with the **same barcodes** works for step 2 —
+> coords join to `cell_labels.tsv` by barcode, so the per-cell cluster labels stay
+> correct (only the visual layout changes). E.g. the existing `harmony_leiden`
+> tree at `…/dissect/harmony_leiden/harmony_leiden` can be driven by
+> `export-coords … --output-dir …/dissect/harmony_leiden/harmony_leiden --umap-key X_umap`.
 
 ## Modules
 
