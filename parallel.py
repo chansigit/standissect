@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import random
 import time
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import multiprocessing
 
 _BLAS_VARS = ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS',
@@ -29,6 +29,26 @@ def thread_map(fn, items, *, max_workers):
         return [fn(x) for x in items]
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         return list(ex.map(fn, items))
+
+
+def thread_imap_unordered(fn, items, *, max_workers):
+    """Yield ``fn(item)`` results as they complete (order NOT preserved).
+
+    Like :func:`thread_map` but a generator that streams each result the moment
+    its task finishes, so the caller can checkpoint incrementally instead of
+    waiting for the whole batch. Use when input order does not matter and you
+    want to act on results as they arrive. Serial (no pool) when
+    ``max_workers<=1`` or there is at most one item.
+    """
+    items = list(items)
+    if max_workers <= 1 or len(items) <= 1:
+        for x in items:
+            yield fn(x)
+        return
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = [ex.submit(fn, x) for x in items]
+        for fut in as_completed(futures):
+            yield fut.result()
 
 
 def process_map(fn, items, *, max_workers):

@@ -32,6 +32,37 @@ def test_thread_map_is_concurrent():
     assert time.perf_counter() - t0 < 1.0      # 8x0.2s serial=1.6s; concurrent<1s
 
 
+def test_thread_imap_unordered_yields_all_results():
+    # order is NOT guaranteed, so compare as a multiset
+    got = sorted(parallel.thread_imap_unordered(_double, [1, 2, 3, 4], max_workers=3))
+    assert got == [2, 4, 6, 8]
+
+
+def test_thread_imap_unordered_serial_fallback():
+    assert sorted(parallel.thread_imap_unordered(_double, [5], max_workers=8)) == [10]
+    assert sorted(parallel.thread_imap_unordered(_double, [1, 2], max_workers=1)) == [2, 4]
+
+
+def test_thread_imap_unordered_streams_as_completed():
+    # a fast item submitted last must surface before a slow item submitted first,
+    # proving results stream on completion rather than in submission order.
+    def work(x):
+        time.sleep(0.0 if x == "fast" else 0.3)
+        return x
+    first = next(iter(parallel.thread_imap_unordered(
+        work, ["slow", "fast"], max_workers=2)))
+    assert first == "fast"
+
+
+def test_thread_imap_unordered_is_concurrent():
+    def slow(x):
+        time.sleep(0.2)
+        return x
+    t0 = time.perf_counter()
+    list(parallel.thread_imap_unordered(slow, list(range(8)), max_workers=8))
+    assert time.perf_counter() - t0 < 1.0      # 8x0.2s serial=1.6s; concurrent<1s
+
+
 def test_process_map_preserves_order():
     # _double is a top-level fn so the spawn pool can pickle it
     assert parallel.process_map(_double, [1, 2, 3], max_workers=2) == [2, 4, 6]

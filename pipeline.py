@@ -23,7 +23,7 @@ import pandas as pd
 
 from .cluster import (umap_leiden_partition, dissect_one_cluster,
                       canonical_marker_deg, plot_minor_profile)
-from .parallel import thread_map, process_map
+from .parallel import thread_imap_unordered, process_map
 from .diagnosis import (
     DEFAULT_ARK_ENDPOINT,
     DEFAULT_ARK_MODEL,
@@ -678,64 +678,48 @@ def _cluster_diagnoses_current(cdir, *, mode, model):
                for _, row in panel.iterrows())
 
 
-def _apply_diagnosis_to_cluster_panel(
-    cdir,
-    engine,
-    *,
-    adata=None,
-    diagnosis_roles=None,
-    annotation_col=None,
-    llm_concurrency=1,
-):
-    """Diagnose every minor row in one cluster panel and rewrite the panel."""
+def _diagnose_panel_row(cdir, row, *, engine, adata=None, diagnosis_roles=None,
+                        annotation_col=None):
+    """Diagnose one minor row, write its artifacts, return the updated row dict.
+
+    A self-contained per-row work unit (no panel.tsv I/O), so callers can pool
+    rows from many clusters into a single thread pool. ``row`` is a panel row
+    (pandas Series); ``cdir`` is that row's owning cluster directory.
+    """
     cdir = Path(cdir)
-    panel_path = cdir / 'panel.tsv'
-    panel = _read_tsv(panel_path)
-    if not len(panel):
-        _ordered_panel(panel).to_csv(panel_path, sep='\t', index=False)
-        return panel
-
-    def _diagnose_row(idx_row):
-        _, row = idx_row
-        row_dict = row.to_dict()
-        subcluster = str(row_dict['subcluster'])
-        reference_subcluster = str(
-            row_dict.get('reference_subcluster')
-            or f"c{row_dict.get('parent_cluster')}_0"
-        )
-        row_dict['reference_subcluster'] = reference_subcluster
-        deg_df = _read_tsv(cdir / f"deg_{subcluster}.tsv")
-        qc_df = _read_tsv(cdir / f"qc_drift_{subcluster}.tsv")
-        comp = _composition_frames_for_subcluster(cdir, subcluster)
-        core_comparisons = _major_core_comparisons(
-            adata,
-            subcluster_col='original_cluster_split',
-            subcluster=subcluster,
-            reference_subcluster=reference_subcluster,
-            deg_df=deg_df,
-        )
-        minor_annotation = _annotation_composition_for_subcluster(
-            adata, subcluster_col='original_cluster_split', label=subcluster,
-            annotation_col=annotation_col)
-        main_annotation = _annotation_composition_for_subcluster(
-            adata, subcluster_col='original_cluster_split',
-            label=reference_subcluster, annotation_col=annotation_col)
-        evidence = build_minor_evidence(
-            row_dict, deg_df=deg_df, qc_df=qc_df, composition_frames=comp,
-            major_core_comparisons=core_comparisons,
-            diagnosis_roles=diagnosis_roles,
-            annotation_col=annotation_col,
-            minor_annotation=minor_annotation, main_annotation=main_annotation)
-        result = engine.diagnose(evidence)
-        row_dict.update(result.to_panel_fields())
-        write_diagnosis_artifacts(cdir, evidence, result)
-        return row_dict
-
-    rows = thread_map(_diagnose_row, list(panel.iterrows()), max_workers=llm_concurrency)
-
-    diagnosed = _ordered_panel(pd.DataFrame(rows))
-    diagnosed.to_csv(panel_path, sep='\t', index=False)
-    return diagnosed
+    row_dict = row.to_dict()
+    subcluster = str(row_dict['subcluster'])
+    reference_subcluster = str(
+        row_dict.get('reference_subcluster')
+        or f"c{row_dict.get('parent_cluster')}_0"
+    )
+    row_dict['reference_subcluster'] = reference_subcluster
+    deg_df = _read_tsv(cdir / f"deg_{subcluster}.tsv")
+    qc_df = _read_tsv(cdir / f"qc_drift_{subcluster}.tsv")
+    comp = _composition_frames_for_subcluster(cdir, subcluster)
+    core_comparisons = _major_core_comparisons(
+        adata,
+        subcluster_col='original_cluster_split',
+        subcluster=subcluster,
+        reference_subcluster=reference_subcluster,
+        deg_df=deg_df,
+    )
+    minor_annotation = _annotation_composition_for_subcluster(
+        adata, subcluster_col='original_cluster_split', label=subcluster,
+        annotation_col=annotation_col)
+    main_annotation = _annotation_composition_for_subcluster(
+        adata, subcluster_col='original_cluster_split',
+        label=reference_subcluster, annotation_col=annotation_col)
+    evidence = build_minor_evidence(
+        row_dict, deg_df=deg_df, qc_df=qc_df, composition_frames=comp,
+        major_core_comparisons=core_comparisons,
+        diagnosis_roles=diagnosis_roles,
+        annotation_col=annotation_col,
+        minor_annotation=minor_annotation, main_annotation=main_annotation)
+    result = engine.diagnose(evidence)
+    row_dict.update(result.to_panel_fields())
+    write_diagnosis_artifacts(cdir, evidence, result)
+    return row_dict
 
 
 def _run_diagnosis_stage(
@@ -749,7 +733,16 @@ def _run_diagnosis_stage(
     annotation_col=None,
     llm_concurrency=1,
 ):
-    """Run diagnosis where missing, stale, or explicitly forced."""
+    """Run diagnosis where missing, stale, or explicitly forced.
+
+    Every minor row of every to-do cluster is pooled into ONE thread pool so the
+    ``llm_concurrency`` workers stay saturated no matter how few minors a single
+    cluster has — previously clusters ran serially and a cluster with fewer
+    minors than ``llm_concurrency`` starved the pool. Each cluster's panel.tsv is
+    rewritten the instant its last row finishes, so an interrupt mid-stage still
+    leaves already-finished clusters fully persisted (and idempotently skipped on
+    rerun, since `_cluster_diagnoses_current` keys off the per-row artifacts).
+    """
     mode = getattr(engine, 'mode', 'rule')
     model = getattr(engine, 'model', None)
     todo = [
@@ -757,15 +750,47 @@ def _run_diagnosis_stage(
         if forced or not _cluster_diagnoses_current(
             lay.cluster_dir(p), mode=mode, model=model)
     ]
-    if todo:
-        print(f"[pipeline] diagnosing minor causes for {len(todo)} clusters "
-              f"(mode={mode}) ...", flush=True)
-        for p in todo:
-            _apply_diagnosis_to_cluster_panel(lay.cluster_dir(p), engine,
-                                              adata=adata,
-                                              diagnosis_roles=diagnosis_roles,
-                                              annotation_col=annotation_col,
-                                              llm_concurrency=llm_concurrency)
+
+    # Read every to-do panel up front and flatten its rows into one work list.
+    panels = {}          # cdir(str) -> {'path', 'remaining', 'results'}
+    tasks = []           # (cdir(str), pos, row) — pos = original row index
+    for p in todo:
+        cdir = Path(lay.cluster_dir(p))
+        path = cdir / 'panel.tsv'
+        panel = _read_tsv(path)
+        if not len(panel):
+            _ordered_panel(panel).to_csv(path, sep='\t', index=False)
+            continue
+        panels[str(cdir)] = {'path': path, 'remaining': len(panel), 'results': {}}
+        for pos, (_, row) in enumerate(panel.iterrows()):
+            tasks.append((str(cdir), pos, row))
+
+    if tasks:
+        print(f"[pipeline] diagnosing {len(tasks)} minors across {len(panels)} "
+              f"clusters (mode={mode}, concurrency={llm_concurrency}) ...",
+              flush=True)
+
+        def _work(task):
+            cdir_s, pos, row = task
+            return cdir_s, pos, _diagnose_panel_row(
+                cdir_s, row, engine=engine, adata=adata,
+                diagnosis_roles=diagnosis_roles, annotation_col=annotation_col)
+
+        done = 0
+        for cdir_s, pos, row_dict in thread_imap_unordered(
+                _work, tasks, max_workers=llm_concurrency):
+            done += 1
+            info = panels[cdir_s]
+            info['results'][pos] = row_dict
+            info['remaining'] -= 1
+            if info['remaining'] == 0:        # cluster done -> persist immediately
+                rows = [info['results'][i] for i in range(len(info['results']))]
+                _ordered_panel(pd.DataFrame(rows)).to_csv(
+                    info['path'], sep='\t', index=False)
+            if done % 25 == 0 or done == len(tasks):
+                print(f"[pipeline]   diagnosed {done}/{len(tasks)} minors",
+                      flush=True)
+
     print(f"[pipeline] diagnosis: {len(todo)} clusters computed, "
           f"{len(crosstab.index) - len(todo)} reused", flush=True)
     return [f'diagnosis:c{p}' for p in crosstab.index if p not in set(todo)]

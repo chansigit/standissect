@@ -151,6 +151,70 @@ def test_annotation_composition_all_blank_is_empty():
         annotation_col='free_annotation') == []
 
 
+def test_run_diagnosis_stage_pools_globally_and_persists_per_cluster(tmp_path, monkeypatch):
+    # The diagnosis stage flattens every minor across every to-do cluster into a
+    # single thread pool, but must still (a) write each cluster's panel.tsv with
+    # diagnosis fields, (b) preserve each panel's original row order despite
+    # unordered completion, and (c) be idempotent on a non-forced rerun.
+    import json
+    import time
+    import pandas as pd
+    from standissect import pipeline
+
+    lay = pipeline._Layout(str(tmp_path), 'leiden')
+    # uneven minor counts (incl. a 1-minor cluster that would starve a per-cluster
+    # pool) plus an empty-panel cluster that must still be (re)written.
+    layout = {0: ['c0_1', 'c0_2', 'c0_3'], 1: ['c1_1'], 2: ['c2_1', 'c2_2'], 3: []}
+    for p, subs in layout.items():
+        cdir = lay.cluster_dir(p)
+        cdir.mkdir(parents=True)
+        pd.DataFrame({'parent_cluster': [p] * len(subs), 'subcluster': subs}).to_csv(
+            cdir / 'panel.tsv', sep='\t', index=False)
+    crosstab = pd.DataFrame(index=[0, 1, 2, 3])
+
+    class FakeEngine:
+        mode, model = 'llm', 'm'
+
+    calls = {'n': 0}
+
+    def _fake(cdir, row, *, engine, adata=None, diagnosis_roles=None, annotation_col=None):
+        calls['n'] += 1
+        cdir = pathlib.Path(cdir)
+        sub = str(row['subcluster'])
+        # invert sleep by minor index so later rows finish FIRST -> forces the
+        # unordered pool to scramble completion order within a cluster.
+        time.sleep(0.02 * (9 - int(sub.split('_')[1])))
+        # write the artifact `_cluster_diagnoses_current` keys idempotency off of
+        pipeline._diagnosis_output_path(cdir, sub).write_text(json.dumps({
+            'prompt_version': pipeline.PROMPT_VERSION,
+            'diagnosis_mode': engine.mode, 'model': engine.model}), encoding='utf-8')
+        d = row.to_dict()
+        d['likely_cause'] = 'sample-driven'
+        d['recommended_disposition'] = 'KEEP'
+        return d
+
+    monkeypatch.setattr(pipeline, '_diagnose_panel_row', _fake)
+
+    reused = pipeline._run_diagnosis_stage(
+        lay, crosstab, FakeEngine(), forced=True, llm_concurrency=4)
+
+    assert calls['n'] == 6                       # 3+1+2 minors; empty cluster = 0 calls
+    assert reused == []                          # forced -> nothing reused
+    for p, subs in layout.items():
+        panel = pd.read_csv(lay.cluster_dir(p) / 'panel.tsv', sep='\t')
+        assert list(panel['subcluster'].dropna().astype(str)) == subs   # order kept
+        if subs:
+            assert list(panel['recommended_disposition']) == ['KEEP'] * len(subs)
+            assert list(panel['likely_cause']) == ['sample-driven'] * len(subs)
+
+    # idempotent rerun: all clusters current -> no diagnosis work, all reused.
+    calls['n'] = 0
+    reused2 = pipeline._run_diagnosis_stage(
+        lay, crosstab, FakeEngine(), forced=False, llm_concurrency=4)
+    assert calls['n'] == 0
+    assert set(reused2) == {f'diagnosis:c{p}' for p in [0, 1, 2, 3]}
+
+
 def test_dissect_min_subcluster_size_zero_ignores_foreign_labels():
     # Regression: with --min-subcluster-size 0 the minor filter must still
     # exclude crosstab columns with 0 cells in this parent (they belong to other
