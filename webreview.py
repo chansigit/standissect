@@ -12,8 +12,14 @@ annotations`` — FastAPI must see the real Pydantic request-model classes
 (``Decision``/``Selection``) as annotation objects, not PEP 563 strings, to
 treat them as request bodies.
 """
+import os
 from pathlib import Path
 import re
+import signal
+import socket
+import subprocess
+import tempfile
+import time
 
 import pandas as pd
 
@@ -327,17 +333,118 @@ def build_app(root, decisions_file=None, reviewer=""):
     return app
 
 
-def serve(root, host="127.0.0.1", port=8050, decisions_file=None, reviewer=""):
+def _pidfile(port):
+    return Path(tempfile.gettempdir()) / f"standissect-serve-{port}.pid"
+
+
+def _port_in_use(host, port):
+    target = "127.0.0.1" if host in ("0.0.0.0", "", "::") else host
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.3)
+        try:
+            return s.connect_ex((target, int(port))) == 0
+        except OSError:
+            return False
+
+
+def _pids_on_port(port):
+    """Best-effort PIDs listening on ``port`` via lsof/fuser (empty if neither)."""
+    pids = set()
+    for cmd in (["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+                ["fuser", f"{port}/tcp"]):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        except Exception:
+            continue
+        for tok in (out.stdout + " " + out.stderr).replace("\n", " ").split():
+            tok = tok.strip().split("/")[0]
+            if tok.isdigit():
+                pids.add(int(tok))
+        if pids:
+            break
+    return pids
+
+
+def _looks_like_server(pid):
+    try:
+        cmd = (Path(f"/proc/{pid}/cmdline").read_bytes()
+               .replace(b"\x00", b" ").decode("utf-8", "replace").lower())
+    except Exception:
+        return False
+    return "uvicorn" in cmd or ("standissect" in cmd and "serve" in cmd)
+
+
+def _ensure_port_free(host, port, *, wait=8.0):
+    """Stop a previous standissect server on this port (idempotent restart).
+
+    Targets only our own prior instance: a PID from our pidfile (trusted) or a
+    process listening on the port whose cmdline looks like a standissect/uvicorn
+    server. Returns True once the port is free.
+    """
+    me = os.getpid()
+    victims = set()
+    pf = _pidfile(port)
+    try:
+        if pf.exists():
+            p = int(pf.read_text().split()[0])
+            if p != me and _port_in_use(host, port):
+                victims.add(p)
+    except Exception:
+        pass
+    for p in _pids_on_port(port):
+        if p != me and _looks_like_server(p):
+            victims.add(p)
+    if not victims:
+        return not _port_in_use(host, port)
+    for p in victims:
+        try:
+            os.kill(p, signal.SIGTERM)
+            print(f"[standissect] stopped previous server (pid {p}) on port {port}")
+        except (ProcessLookupError, PermissionError):
+            pass
+    deadline = time.time() + wait
+    while _port_in_use(host, port) and time.time() < deadline:
+        time.sleep(0.25)
+    if _port_in_use(host, port):                       # escalate to SIGKILL
+        for p in victims:
+            try:
+                os.kill(p, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        end = time.time() + 3
+        while _port_in_use(host, port) and time.time() < end:
+            time.sleep(0.2)
+    return not _port_in_use(host, port)
+
+
+def serve(root, host="127.0.0.1", port=8050, decisions_file=None, reviewer="",
+          replace=True):
     try:
         import uvicorn
     except ImportError as e:                       # pragma: no cover
         raise SystemExit("`standissect serve` needs fastapi + uvicorn:\n"
                          "  pip install fastapi uvicorn "
                          "(run in sh_dev, not the login node)") from e
+    if replace and not _ensure_port_free(host, port):
+        raise SystemExit(
+            f"[standissect] port {port} is still in use and could not be freed "
+            f"(another user's process?). Choose a different --port.")
     app = build_app(root, decisions_file=decisions_file, reviewer=reviewer)
+    pf = _pidfile(port)
+    try:
+        pf.write_text(str(os.getpid()))
+    except Exception:
+        pf = None
     print(f"[standissect] review server for {Path(root).name} "
           f"-> http://{host}:{port}")
-    uvicorn.run(app, host=host, port=port)
+    try:
+        uvicorn.run(app, host=host, port=port)
+    finally:
+        if pf is not None:
+            try:
+                pf.unlink()
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":                         # pragma: no cover

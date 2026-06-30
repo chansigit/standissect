@@ -190,7 +190,8 @@ def report_cmd(args):
 def serve_cmd(args):
     from .webreview import serve
     serve(args.output_root, host=args.host, port=args.port,
-          decisions_file=args.decisions_file, reviewer=args.reviewer)
+          decisions_file=args.decisions_file, reviewer=args.reviewer,
+          replace=not args.no_replace)
     return 0
 
 
@@ -252,6 +253,10 @@ def build_parser():
                           '<output_root>/human_review.tsv.')
     srv.add_argument('--reviewer', default=os.environ.get('USER', ''),
                      help='Reviewer name recorded with decisions. Default: $USER.')
+    srv.add_argument('--no-replace', action='store_true',
+                     help='Do not stop an existing server on the same port. By '
+                          'default the restart is idempotent: any prior standissect '
+                          'server on --port is stopped first.')
     srv.set_defaults(func=serve_cmd)
 
     ec = sub.add_parser('export-coords',

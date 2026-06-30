@@ -89,6 +89,11 @@ def test_cli_serve_overrides():
     assert a.decisions_file == "d.tsv" and a.reviewer == "sijie"
 
 
+def test_cli_serve_no_replace():
+    assert build_parser().parse_args(["serve", "/run"]).no_replace is False
+    assert build_parser().parse_args(["serve", "/run", "--no-replace"]).no_replace is True
+
+
 def test_cli_export_coords():
     a = build_parser().parse_args(
         ["export-coords", "x.h5ad", "--output-dir", "/run",

@@ -164,3 +164,24 @@ def test_no_coords(tmp_path):
     c = _client(tmp_path)
     assert c.get("/api/run").json()["has_coords"] is False
     assert c.get("/api/cells").status_code == 404
+
+
+def test_port_in_use_detection():
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    s.listen()
+    port = s.getsockname()[1]
+    try:
+        assert webreview._port_in_use("127.0.0.1", port) is True
+    finally:
+        s.close()
+
+
+def test_port_free_detection():
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    assert webreview._port_in_use("127.0.0.1", port) is False
