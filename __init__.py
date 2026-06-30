@@ -43,9 +43,31 @@ from .annotate import (
     make_naming_engine,
 )
 
+
+def serve(*args, **kwargs):
+    """Launch the interactive review server (lazy: imports fastapi only here)."""
+    from .webreview import serve as _serve
+    return _serve(*args, **kwargs)
+
+
+def build_app(*args, **kwargs):
+    """Build the review FastAPI app (lazy import of fastapi)."""
+    from .webreview import build_app as _build_app
+    return _build_app(*args, **kwargs)
+
+
+def export_cell_coords(*args, **kwargs):
+    """Export per-cell UMAP coords for the interactive UMAP (lazy import)."""
+    from .export_coords import export_cell_coords as _ecc
+    return _ecc(*args, **kwargs)
+
+
 __version__ = "0.1.1"
 __all__ = [
     "run_dissect_pipeline",
+    "serve",
+    "build_app",
+    "export_cell_coords",
     "build_report",
     "ArkChatClient",
     "DiagnosisResult",

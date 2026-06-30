@@ -72,3 +72,27 @@ def test_cli_annotation_col_override():
     a = build_parser().parse_args(["run", "x.h5ad", "--cluster-col", "leiden",
         "--output-dir", "o", "--annotation-col", "cell_ontology_class"])
     assert a.annotation_col == "cell_ontology_class"
+
+
+def test_cli_serve_defaults():
+    a = build_parser().parse_args(["serve", "/run"])
+    assert a.output_root == "/run"
+    assert a.host == "127.0.0.1" and a.port == 8050
+    assert a.func.__name__ == "serve_cmd"
+
+
+def test_cli_serve_overrides():
+    a = build_parser().parse_args(
+        ["serve", "/run", "--host", "0.0.0.0", "--port", "9000",
+         "--decisions-file", "d.tsv", "--reviewer", "sijie"])
+    assert a.host == "0.0.0.0" and a.port == 9000
+    assert a.decisions_file == "d.tsv" and a.reviewer == "sijie"
+
+
+def test_cli_export_coords():
+    a = build_parser().parse_args(
+        ["export-coords", "x.h5ad", "--output-dir", "/run",
+         "--mito-col", "pct_mt", "--extra-qc-col", "foo", "--extra-qc-col", "bar"])
+    assert a.output_dir == "/run" and a.umap_key == "X_umap"
+    assert a.mito_col == "pct_mt" and a.extra_qc_col == ["foo", "bar"]
+    assert a.func.__name__ == "export_coords_cmd"

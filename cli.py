@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from .diagnosis import DEFAULT_ARK_ENDPOINT, DEFAULT_ARK_MODEL
@@ -186,6 +187,24 @@ def report_cmd(args):
     return 0
 
 
+def serve_cmd(args):
+    from .webreview import serve
+    serve(args.output_root, host=args.host, port=args.port,
+          decisions_file=args.decisions_file, reviewer=args.reviewer)
+    return 0
+
+
+def export_coords_cmd(args):
+    from .export_coords import export_cell_coords
+    qc = [c for c in (args.doublet_score_col, args.mito_col,
+                      args.feature_count_col, args.umi_count_col) if c]
+    qc += list(args.extra_qc_col or [])
+    out = export_cell_coords(args.h5ad, args.output_dir,
+                             umap_key=args.umap_key, qc_cols=tuple(qc))
+    print(f"[standissect] wrote {out}")
+    return 0
+
+
 def columns_cmd(args):
     try:
         import anndata as ad
@@ -221,6 +240,36 @@ def build_parser():
     columns = sub.add_parser('columns', help='List h5ad obs columns and obsm keys.')
     columns.add_argument('h5ad', help='Input AnnData .h5ad file.')
     columns.set_defaults(func=columns_cmd)
+
+    srv = sub.add_parser('serve', help='Interactive review server for a run.')
+    srv.add_argument('output_root', help='A standissect output root.')
+    srv.add_argument('--host', default='127.0.0.1',
+                     help='Bind address. Default: 127.0.0.1.')
+    srv.add_argument('--port', type=int, default=8050,
+                     help='Port. Default: 8050.')
+    srv.add_argument('--decisions-file',
+                     help='Path for human verdicts. Default: '
+                          '<output_root>/human_review.tsv.')
+    srv.add_argument('--reviewer', default=os.environ.get('USER', ''),
+                     help='Reviewer name recorded with decisions. Default: $USER.')
+    srv.set_defaults(func=serve_cmd)
+
+    ec = sub.add_parser('export-coords',
+                        help='Export per-cell UMAP coords (cell_coords.tsv.gz) '
+                             'for the interactive UMAP in `serve`.')
+    ec.add_argument('h5ad', help='Input AnnData .h5ad file.')
+    ec.add_argument('--output-dir', required=True,
+                    help='A standissect output root (where cell_coords.tsv.gz '
+                         'is written).')
+    ec.add_argument('--umap-key', default='X_umap',
+                    help='Embedding key in adata.obsm. Default: X_umap.')
+    ec.add_argument('--doublet-score-col', help='Optional QC column to include.')
+    ec.add_argument('--mito-col', help='Optional QC column to include.')
+    ec.add_argument('--feature-count-col', help='Optional QC column to include.')
+    ec.add_argument('--umi-count-col', help='Optional QC column to include.')
+    ec.add_argument('--extra-qc-col', action='append', default=[],
+                    help='Additional continuous QC column. Repeatable.')
+    ec.set_defaults(func=export_coords_cmd)
 
     return parser
 
