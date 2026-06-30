@@ -111,7 +111,7 @@ function renderCluster(d) {
       el("figcaption", {}, el("span", {id: "umapcap"}, `UMAP — cluster ${d.cid}`),
         el("span", {class: "hl-sel"}, "view ", hlSel)),
       el("div", {class: "hint umaphint"},
-        "left-drag = pan · right-drag = lasso select · scroll = zoom · double-click = reset"),
+        "left-drag = pan · right-drag = lasso · click = select group · scroll = zoom · double-click = reset"),
       el("div", {id: "umap", class: "plot loading"}, "loading cells…")));
     box.append(viz);
     drawClusterUmaps(d.cid);
@@ -330,6 +330,8 @@ function _react2(bg, fg, xr, yr) {
   gd.removeAllListeners && gd.removeAllListeners("plotly_selected");
   gd.on("plotly_selected", onSelected);
   gd.on("plotly_deselect", closeSel);
+  gd.removeAllListeners && gd.removeAllListeners("plotly_click");
+  gd.on("plotly_click", onPointClick);
   bindRightDragLasso(gd);
 }
 
@@ -393,6 +395,20 @@ function onSelected(ev) {
   const pts = ev.points.filter(p => p.curveNumber === 1);
   if (!pts.length) { closeSel(); return; }
   STATE.selIndices = pts.map(p => p.customdata);   // customdata = global index
+  showSelStats();
+}
+
+// click a focus point → select the WHOLE focus group (the cluster/minor of
+// interest), producing the same selection payload + panel as a lasso. Only the
+// focus trace (curveNumber 1) is selectable; clicking a background cell is ignored.
+function onPointClick(ev) {
+  if (!ev || !ev.points) return;
+  const pt = ev.points.find(p => p.curveNumber === 1);
+  if (!pt || !pt.data || !pt.data.customdata || !pt.data.customdata.length) return;
+  const cd = pt.data.customdata;
+  STATE.selIndices = cd.slice();                   // every focus cell (global indices)
+  const gd = document.getElementById("umap");
+  if (gd) Plotly.restyle(gd, {selectedpoints: [[...cd.keys()]]}, [1]);  // mark focus selected
   showSelStats();
 }
 
