@@ -5,7 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>standissect review</title>
   <link rel="stylesheet" href="/static/style.css">
-  <script src="/static/plotly.min.js"></script>
+  <!-- Plotly from CDN (your browser loads it; works fine over an SSH tunnel / ngrok).
+       To run fully offline instead, drop plotly-2.35.2.min.js into webreview_static/
+       and point this src at /static/plotly.min.js. -->
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
 </head>
 <body>
   <div id="topbar">

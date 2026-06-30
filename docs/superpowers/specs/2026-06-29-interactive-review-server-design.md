@@ -58,7 +58,7 @@ standissect/
     index.html           # single-page dashboard (no build step)
     app.js               # vanilla JS: fetch APIs, render dashboard + Plotly UMAP
     style.css
-    plotly.min.js        # vendored (WebGL scatter + lasso/box select); no CDN
+    # Plotly (WebGL scatter + lasso/box select) loaded from CDN at runtime, not vendored
   cli.py                 # + `serve` and `export-coords` subcommands
 ```
 
@@ -136,7 +136,7 @@ restarting `serve` resumes from the on-disk state.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/` | the SPA (`index.html`) |
-| GET | `/static/*` | static assets (`app.js`, `style.css`, `plotly.min.js`) |
+| GET | `/static/*` | static assets (`app.js`, `style.css`); Plotly loads from CDN |
 | GET | `/api/run` | run summary: clusters (id, core name, #minors, #decided), totals, `has_coords` |
 | GET | `/api/cluster/{cid}` | one cluster: core name, narrative, all subclusters (minors reviewable; core + below-threshold read-only), each merged with any existing human decision; image + table descriptors |
 | GET | `/api/image/{cid}/{name}` | stream a PNG (`minor_profile` / `umap_subcluster`) via `FileResponse` |
@@ -283,6 +283,6 @@ where the optional deps are absent.
   output (no coords needed). Ships standalone value.
 - **M2 — interactive UMAP + lasso.** `export_coords.py` + `export-coords` CLI,
   `/api/cells` and the selection endpoints, `ManualStore`, the Plotly UMAP +
-  selection panel in the SPA, vendored `plotly.min.js`, the coords/selection
+  selection panel in the SPA, Plotly loaded from CDN, the coords/selection
   tests.
 ```
