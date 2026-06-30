@@ -202,6 +202,22 @@ def test_deg_disabled_without_h5ad(tmp_path):
     assert c.post("/api/deg", json={"a": [0, 1], "b": [2, 3]}).status_code == 400
 
 
+def test_expr_feature_plot(tmp_path):
+    pytest.importorskip("anndata")
+    _make_run(tmp_path)
+    p = tmp_path / "expr.h5ad"
+    _write_expr_h5ad(p)
+    c = _client(tmp_path, h5ad=str(p))
+    j = c.get("/api/expr/G0").json()
+    assert j["gene"] == "G0"
+    assert len(j["values"]) == 8                       # cell8 (NaN coord) dropped
+    assert j["values"][:4] == [3.0, 3.0, 3.0, 3.0]     # G0 high in cell0-3
+    assert all(v == 0.0 for v in j["values"][4:])
+    assert j["vmax"] > 0
+    assert c.get("/api/expr/NOPE").status_code == 404
+    assert _client(tmp_path).get("/api/expr/G0").status_code == 400   # disabled w/o --h5ad
+
+
 def test_index_and_static(tmp_path):
     _make_run(tmp_path)
     c = _client(tmp_path)

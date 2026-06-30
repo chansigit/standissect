@@ -2,7 +2,7 @@
 // standissect review — dashboard with inline interactive UMAPs + lasso review.
 
 const STATE = {run: null, cid: null, cells: null, selIndices: [], heat: null,
-  _heatHL: null, degA: null, degB: null};
+  _heatHL: null, degA: null, degB: null, degArm: null, geneExpr: null};
 const PALETTE = ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f",
   "#edc948", "#b07aa1", "#ff9da7", "#9c755f", "#bab0ac", "#1f77b4", "#d62728",
   "#2ca02c", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"];
@@ -107,10 +107,15 @@ function renderCluster(d) {
     const hlSel = el("select", {id: "hlSel",
       onchange: () => drawUmap(d.cid, hlSel.value)});
     viz.append(el("figure", {},
-      el("figcaption", {}, el("span", {id: "umapcap"}, `UMAP — cluster ${d.cid}`),
-        el("span", {class: "hl-sel"}, "view ", hlSel)),
+      el("figcaption", {},
+        el("span", {id: "umapcap"}, `UMAP — cluster ${d.cid}`),
+        el("span", {class: "hl-sel"}, "view ", hlSel,
+          STATE.run.deg_enabled
+            ? el("button", {class: "deg-open", onclick: openDeg,
+                title: "differential expression between two lassoed groups"}, "DEG")
+            : null)),
       el("div", {class: "hint umaphint"},
-        "left-drag = pan · right-drag = lasso · click = select group · scroll = zoom · double-click = reset"),
+        "left-drag = pan · hold Shift + drag = lasso · click = select group · scroll = zoom · double-click = reset"),
       el("div", {id: "umap", class: "plot loading"}, "loading cells…")));
     box.append(viz);
     drawHeatmap(d.cid);                 // after viz is in the DOM (getElementById works)
@@ -306,16 +311,25 @@ function _squareRange(C, keep) {
 //   trace 0 = background (not selectable; selection styling neutralised)
 //   trace 1 = focus cells of interest (selectable, on top)
 // customdata on each point is the global cell index.
-function _react2(bg, fg, xr, yr) {
-  const mkTrace = (d, neutral) => ({
-    type: "scattergl", mode: "markers", x: d.x, y: d.y, text: d.t, customdata: d.cd,
-    hovertemplate: "%{text}<extra></extra>",
-    marker: {size: d.s, color: d.c, opacity: 1, line: {width: 0}},
-    selected: {marker: {opacity: 1}},
-    unselected: {marker: {opacity: neutral ? 1 : 0.15}},
-  });
+function _react2(bg, fg, xr, yr, gene) {
+  const mkTrace = (d, neutral) => {
+    const marker = gene
+      ? {size: d.s, color: d.c, colorscale: "Viridis", cmin: 0, cmax: gene.cmax,
+         showscale: !neutral, line: {width: 0},
+         colorbar: {len: 0.92, thickness: 8, x: 1.005, xanchor: "left", outlinewidth: 0,
+                    tickfont: {size: 8}, title: {text: gene.name, side: "right", font: {size: 9}}}}
+      : {size: d.s, color: d.c, opacity: 1, line: {width: 0}};
+    return {
+      type: "scattergl", mode: "markers", x: d.x, y: d.y, text: d.t, customdata: d.cd,
+      hovertemplate: gene ? "%{text}<br>%{marker.color:.2f}<extra></extra>"
+                          : "%{text}<extra></extra>",
+      marker,
+      selected: {marker: {opacity: 1}},
+      unselected: {marker: {opacity: neutral ? 1 : 0.15}},
+    };
+  };
   const layout = {
-    margin: {l: 30, r: 8, t: 6, b: 26}, dragmode: "pan", hovermode: "closest",
+    margin: {l: 30, r: gene ? 48 : 8, t: 6, b: 26}, dragmode: "pan", hovermode: "closest",
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
     xaxis: {range: xr, zeroline: false, showticklabels: false, constrain: "domain"},
     yaxis: {range: yr, zeroline: false, showticklabels: false,
@@ -333,22 +347,21 @@ function _react2(bg, fg, xr, yr) {
   gd.on("plotly_deselect", closeSel);
   gd.removeAllListeners && gd.removeAllListeners("plotly_click");
   gd.on("plotly_click", onPointClick);
-  bindRightDragLasso(gd);
+  _activeGd = gd;
 }
 
-// left-drag = pan (default); hold RIGHT button to lasso, release to return to pan.
+// left-drag = pan (default); hold Shift to momentarily switch to lasso, release
+// to return to pan. Plotly's drag only honours the LEFT button and dragmode
+// changes are async, so a right-button gesture can't lasso — Shift flips the
+// mode on keydown (well before the mouse moves), which is reliable.
 let _activeGd = null;
-function bindRightDragLasso(gd) {
-  _activeGd = gd;
-  if (gd._rdrag) return;
-  gd._rdrag = true;
-  gd.addEventListener("mousedown", e => {
-    if (e.button === 2) Plotly.relayout(gd, "dragmode", "lasso");
-  }, true);
-  gd.addEventListener("contextmenu", e => e.preventDefault());
-}
-window.addEventListener("mouseup", e => {
-  if (e.button === 2 && _activeGd && _activeGd._fullLayout &&
+window.addEventListener("keydown", e => {
+  if (e.key === "Shift" && !e.repeat && _activeGd && _activeGd._fullLayout &&
+      _activeGd._fullLayout.dragmode !== "lasso")
+    Plotly.relayout(_activeGd, "dragmode", "lasso");
+});
+window.addEventListener("keyup", e => {
+  if (e.key === "Shift" && _activeGd && _activeGd._fullLayout &&
       _activeGd._fullLayout.dragmode === "lasso")
     Plotly.relayout(_activeGd, "dragmode", "pan");
 });
@@ -364,6 +377,7 @@ function drawUmap(cid, hl) {
   const minor = (!global && hl) ? hl : null;
   const inCluster = i => subCats[C.subcluster[i]].startsWith(parPref);
   const isFocus = minor ? (i => subCats[C.subcluster[i]] === minor) : inCluster;
+  const gene = STATE.geneExpr;                     // feature-plot mode when set
 
   function colorOf(i) {
     const s = subCats[C.subcluster[i]];
@@ -377,17 +391,28 @@ function drawUmap(cid, hl) {
   for (let i = 0; i < N; i++) {
     const foc = isFocus(i);
     const d = foc ? fg : bg;
-    d.x.push(C.x[i]); d.y.push(C.y[i]); d.c.push(colorOf(i));
+    d.x.push(C.x[i]); d.y.push(C.y[i]);
+    d.c.push(gene ? (gene.vals[i] == null ? 0 : gene.vals[i]) : colorOf(i));
     d.s.push(foc ? (minor ? 9 : 6) : (inCluster(i) ? 6 : 3));
     d.cd.push(i); d.t.push(subCats[C.subcluster[i]]);
   }
-  const [xr, yr] = _squareRange(C, inCluster);   // always zoom to the current cluster
-  _react2(bg, fg, xr, yr);
+  STATE._umapGlobal = global;                     // global view = lasso selects ALL clusters
+  // global fits the whole UMAP (so you can lasso across clusters); cluster/minor
+  // views zoom to the cluster of interest.
+  const [xr, yr] = _squareRange(C, global ? null : inCluster);
+  _react2(bg, fg, xr, yr, gene ? {name: gene.gene, cmax: gene.vmax} : null);
   highlightHeatCols(heatFocusCols(cid, hl));      // sync the heatmap column highlight
   const cap = document.getElementById("umapcap");
-  if (cap) cap.textContent = global
-    ? `UMAP — cluster ${cid} in context (all clusters)`
-    : `UMAP — cluster ${cid}` + (minor ? ` · ${minor}` : " · all minors");
+  if (cap) {
+    cap.textContent = "";
+    if (gene)
+      cap.append(`UMAP · ${gene.gene} expression `,
+        el("a", {class: "gene-clear", onclick: clearGene, title: "back to cluster colours"}, "✕"));
+    else
+      cap.append(global
+        ? `UMAP — cluster ${cid} in context (all clusters)`
+        : `UMAP — cluster ${cid}` + (minor ? ` · ${minor}` : " · all minors"));
+  }
 }
 
 // ---------------------------------------------------------------- heatmap
@@ -522,11 +547,26 @@ function highlightHeatCols(names) {
 
 // ---------------------------------------------------------------- selection
 function onSelected(ev) {
-  if (!ev || !ev.points) { closeSel(); return; }
-  // only the focus trace (curveNumber 1) is selectable; ignore background cells
+  if (!ev || !ev.points || !ev.points.length) { if (!STATE.degArm) closeSel(); return; }
+  if (STATE.degArm) {
+    // DEG capture: a SEPARATE flow from keep/discard — take every lassoed cell
+    // (any cluster, no focus restriction) into the armed group.
+    const idx = ev.points.map(p => p.customdata);
+    if (idx.length < 2) { toast("lasso at least 2 cells", true); return; }
+    const w = STATE.degArm;
+    if (w === "a") STATE.degA = idx; else STATE.degB = idx;
+    STATE.degArm = null;
+    _syncDegbar();
+    const h = document.getElementById("degHint");
+    if (h) h.textContent = (STATE.degA && STATE.degB)
+      ? "both groups set — click Compute." : `group ${w.toUpperCase()} set · arm the other.`;
+    toast(`group ${w.toUpperCase()} = ${idx.length} cells`);
+    return;
+  }
+  // keep/discard: only the focus (curveNumber 1) is selectable, as before.
   const pts = ev.points.filter(p => p.curveNumber === 1);
   if (!pts.length) { closeSel(); return; }
-  STATE.selIndices = pts.map(p => p.customdata);   // customdata = global index
+  STATE.selIndices = pts.map(p => p.customdata);
   showSelStats();
 }
 
@@ -534,6 +574,7 @@ function onSelected(ev) {
 // interest), producing the same selection payload + panel as a lasso. Only the
 // focus trace (curveNumber 1) is selectable; clicking a background cell is ignored.
 function onPointClick(ev) {
+  if (STATE.degArm) return;               // armed for a DEG lasso — ignore clicks
   if (!ev || !ev.points) return;
   const pt = ev.points.find(p => p.curveNumber === 1);
   if (!pt || !pt.data || !pt.data.customdata || !pt.data.customdata.length) return;
@@ -579,7 +620,6 @@ function showSelStats() {
       `${key}: ${vals[0].toFixed(2)} / ${med.toFixed(2)} / ${vals[vals.length - 1].toFixed(2)} (min·med·max)`));
   }
   document.getElementById("selpanel").hidden = false;
-  _syncDegBox();
 }
 
 function closeSel() {
@@ -612,25 +652,53 @@ async function manualSel(disp) {
 }
 
 // ---------------------------------------------------------------- DEG (A vs B)
-// snapshot the current lasso/click selection into group A or B; compute Mann-
-// Whitney DEG between the two groups server-side (needs serve --h5ad).
-function setDegGroup(which) {
-  if (!STATE.selIndices.length) { toast("select cells first", true); return; }
-  if (which === "a") STATE.degA = STATE.selIndices.slice();
-  else STATE.degB = STATE.selIndices.slice();
-  _syncDegBox();
-  toast(`group ${which.toUpperCase()} = ${STATE.selIndices.length} cells`);
+// A dedicated flow, fully separate from the keep/discard selection: open the DEG
+// panel from the UMAP's "DEG" button, "Lasso A"/"Lasso B" arm the next lasso to
+// fill that group (any cells, across clusters — no focus restriction), then
+// Compute runs Mann-Whitney server-side.
+function openDeg() {
+  if (!(STATE.run && STATE.run.deg_enabled)) return;
+  document.getElementById("degpanel").hidden = false;
+  _syncDegbar();
 }
 
-function _syncDegBox() {
-  const box = document.getElementById("degbox");
-  if (!box) return;
-  box.hidden = !(STATE.run && STATE.run.deg_enabled);
+function closeDeg() {
+  document.getElementById("degpanel").hidden = true;
+  STATE.degArm = null;
+  _setArmedUI();
+}
+
+function armDeg(which) {
+  STATE.degArm = which;
+  _setArmedUI();
+  const h = document.getElementById("degHint");
+  if (h) h.textContent = `now lasso group ${which.toUpperCase()} on the UMAP (hold Shift + drag).`;
+}
+
+function _setArmedUI() {
+  for (const w of ["a", "b"]) {
+    const btn = document.getElementById("degArm" + w.toUpperCase());
+    if (btn) btn.classList.toggle("armed", STATE.degArm === w);
+  }
+}
+
+function _syncDegbar() {
   const ca = document.getElementById("degAchip"), cb = document.getElementById("degBchip");
   if (ca) ca.textContent = STATE.degA ? `A · ${STATE.degA.length}` : "A —";
   if (cb) cb.textContent = STATE.degB ? `B · ${STATE.degB.length}` : "B —";
   const run = document.getElementById("degRun");
   if (run) run.disabled = !(STATE.degA && STATE.degB);
+  _setArmedUI();
+}
+
+function clearDeg() {
+  STATE.degA = null; STATE.degB = null; STATE.degArm = null;
+  const r = document.getElementById("degResult"); if (r) r.innerHTML = "";
+  const h = document.getElementById("degHint");
+  if (h) h.textContent = "Lasso A, then Lasso B (hold Shift + drag), then Compute.";
+  const gd = document.getElementById("umap");
+  if (gd && gd.data) Plotly.restyle(gd, {selectedpoints: [null, null]});  // clear the lasso
+  _syncDegbar();
 }
 
 async function computeDeg() {
@@ -663,13 +731,30 @@ function renderDeg(d) {
     t.append(el("tr", {}, el("th", {}, title), el("th", {}, "log2FC"), el("th", {}, "padj")));
     for (const r of rows)
       t.append(el("tr", {},
-        el("td", {class: "g"}, r.gene),
+        el("td", {class: "g", title: "colour the UMAP by this gene's expression",
+          onclick: () => showGene(r.gene)}, r.gene),
         el("td", {}, r.log2fc == null ? "" : r.log2fc.toFixed(2)),
         el("td", {}, _fmtP(r.padj))));
     return el("div", {class: "deg-col " + cls}, t);
   };
   res.append(el("div", {class: "deg-cols"},
     mk("↑ in A", d.up_in_a, "a"), mk("↑ in B", d.up_in_b, "b")));
+}
+
+// click a gene → colour the UMAP by its (log-norm) expression (a feature plot).
+async function showGene(gene) {
+  try {
+    const d = await api(`/api/expr/${encodeURIComponent(gene)}`);
+    STATE.geneExpr = {gene: d.gene, vals: d.values, vmax: d.vmax || 1};
+    if (STATE.cid != null) drawUmap(STATE.cid, currentHl());
+    toast(`UMAP coloured by ${d.gene}`);
+  } catch (e) { toast("gene expr failed: " + e.message, true); }
+}
+
+function clearGene() {
+  if (!STATE.geneExpr) return;
+  STATE.geneExpr = null;
+  if (STATE.cid != null) drawUmap(STATE.cid, currentHl());
 }
 
 window.addEventListener("DOMContentLoaded", init);

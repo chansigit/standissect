@@ -331,8 +331,14 @@ def _compute_deg(expr, bcs_a, bcs_b, *, layer=None, top_n=25, cap=1500):
     b -= common
     n_unknown = len([x for x in (set(bcs_a) | set(bcs_b)) if x not in bc2row])
     if len(a) < 2 or len(b) < 2:
+        if len(common):
+            raise ValueError(
+                f"groups A and B overlap too much — {len(common)} shared cells were "
+                f"dropped, leaving A={len(a)}, B={len(b)} (need >=2 each). Click Clear "
+                f"and lasso two distinct groups.")
         raise ValueError(
-            "need >=2 cells in each group after removing overlap/unknown barcodes")
+            f"need >=2 cells per group (got A={len(a)}, B={len(b)})"
+            + (f"; {n_unknown} selected barcodes are not in the DEG h5ad" if n_unknown else ""))
     rng = np.random.default_rng(0)
 
     def _rows(s):
@@ -368,6 +374,27 @@ def _compute_deg(expr, bcs_a, bcs_b, *, layer=None, top_n=25, cap=1500):
             "dropped_overlap": int(len(common)), "dropped_unknown": int(n_unknown),
             "layer": layer or "X", "n_genes": int(len(names)),
             "up_in_a": _fmt(up), "up_in_b": _fmt(dn)}
+
+
+def _gene_expr(expr, barcodes, gene, *, layer=None):
+    """Per-cell log-norm expression of one gene, aligned to ``barcodes`` (the
+    cells-payload order); cells absent from the h5ad -> None. Returns
+    ``(values, vmax)`` (vmax = 99th pct of positive values, for feature-plot
+    contrast) or None if the gene is not in the h5ad."""
+    import scipy.sparse as sp
+    adata, bc2row, var_names = expr
+    try:
+        col = var_names.index(gene)
+    except ValueError:
+        return None
+    src = adata.layers[layer] if (layer and layer in adata.layers) else adata.X
+    column = src[:, col]
+    column = (np.asarray(column.todense()).ravel() if sp.issparse(column)
+              else np.asarray(column).ravel())
+    vals = [None if (r := bc2row.get(bc)) is None else float(column[r]) for bc in barcodes]
+    pos = column[column > 0]
+    vmax = float(np.quantile(pos, 0.99)) if pos.size else 1.0
+    return vals, (vmax if vmax > 0 else 1.0)
 
 
 def build_app(root, decisions_file=None, reviewer="", h5ad=None, deg_layer=None):
@@ -537,6 +564,21 @@ def build_app(root, decisions_file=None, reviewer="", h5ad=None, deg_layer=None)
                                 layer=deg_layer, top_n=max(1, min(100, req.top_n)))
         except ValueError as e:
             raise HTTPException(400, str(e))
+
+    @app.get("/api/expr/{gene}")
+    def api_expr(gene: str):
+        if not h5ad:
+            raise HTTPException(400, "expression disabled: restart serve with --h5ad PATH")
+        if not _ensure_cells():
+            raise HTTPException(404, "no cell_coords.tsv.gz")
+        expr = _ensure_expr()
+        if expr is None:
+            raise HTTPException(400, f"could not open DEG h5ad: {h5ad}")
+        res = _gene_expr(expr, app.state.barcodes, gene, layer=deg_layer)
+        if res is None:
+            raise HTTPException(404, f"gene not in h5ad: {gene}")
+        vals, vmax = res
+        return {"gene": gene, "values": vals, "vmax": vmax}
 
     return app
 

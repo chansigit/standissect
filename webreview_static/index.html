@@ -28,7 +28,7 @@
 
   <aside id="selpanel" hidden>
     <div class="sel-head">
-      <span class="sel-title">Lasso selection</span>
+      <span class="sel-title">Selection · keep/discard</span>
       <span id="selcount" class="sel-count"></span>
       <button class="sel-x" onclick="closeSel()" aria-label="close">×</button>
     </div>
@@ -38,16 +38,23 @@
       <button class="btn discard" onclick="manualSel('DISCARD')">Manual discard</button>
       <button class="btn keep" onclick="manualSel('KEEP')">Manual keep</button>
     </div>
-    <div id="degbox" class="sel-deg" hidden>
-      <div class="deg-slots">
-        <button class="btn ghost" onclick="setDegGroup('a')">Set as A</button>
-        <span id="degAchip" class="deg-chip">A —</span>
-        <button class="btn ghost" onclick="setDegGroup('b')">Set as B</button>
-        <span id="degBchip" class="deg-chip">B —</span>
-        <button id="degRun" class="btn deg" onclick="computeDeg()" disabled>DEG&nbsp;A vs B</button>
-      </div>
-      <div id="degResult" class="deg-result"></div>
+  </aside>
+
+  <aside id="degpanel" hidden>
+    <div class="sel-head">
+      <span class="sel-title">DEG · A vs B</span>
+      <button class="sel-x" onclick="closeDeg()" aria-label="close">×</button>
     </div>
+    <div class="deg-slots">
+      <button id="degArmA" class="btn ghost" onclick="armDeg('a')">Lasso A</button>
+      <span id="degAchip" class="deg-chip">A —</span>
+      <button id="degArmB" class="btn ghost" onclick="armDeg('b')">Lasso B</button>
+      <span id="degBchip" class="deg-chip">B —</span>
+      <button id="degRun" class="btn deg" onclick="computeDeg()" disabled>Compute</button>
+      <button class="btn ghost" onclick="clearDeg()">Clear</button>
+    </div>
+    <div id="degHint" class="deg-hint">Lasso A, then Lasso B (Shift + drag), then Compute.</div>
+    <div id="degResult" class="deg-result"></div>
   </aside>
 
   <div id="toast"></div>
