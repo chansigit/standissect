@@ -143,19 +143,36 @@ def _load_cells(root):
         coords = coords.rename(columns={coords.columns[0]: "barcode"})
     coords["barcode"] = coords["barcode"].astype(str)
     labels = _read_tsv_safe(root / "cell_labels.tsv")
+    # the c{parent}_{minor} subcluster label lives in `original_cluster_split`
+    # (cell_labels.tsv's `umap_cluster` is the raw u-fragment, not what we want).
+    sub_col = None
     if len(labels):
         labels = labels.rename(columns={labels.columns[0]: "barcode"})
         labels["barcode"] = labels["barcode"].astype(str)
-        keep = ["barcode"] + [c for c in ("umap_cluster", "recommended_disposition")
-                              if c in labels.columns]
+        sub_col = next((c for c in ("original_cluster_split", "subcluster",
+                                    "umap_cluster") if c in labels.columns), None)
+        keep = ["barcode"] + [c for c in (sub_col, "recommended_disposition")
+                              if c and c in labels.columns]
         df = coords.merge(labels[keep], on="barcode", how="inner")
     else:
         df = coords
-    df["subcluster"] = (df["umap_cluster"].astype(str)
-                        if "umap_cluster" in df.columns else "")
+    df["subcluster"] = (df[sub_col].astype(str)
+                        if sub_col and sub_col in df.columns else "")
     df["disposition"] = (df["recommended_disposition"].fillna("").astype(str)
                          if "recommended_disposition" in df.columns else "")
+    # rows with NaN coordinates cannot be plotted; drop them so indices stay
+    # contiguous and the served arrays are JSON-clean.
+    df = df[df["umap_x"].notna() & df["umap_y"].notna()].reset_index(drop=True)
     return df
+
+
+def _jnum(v):
+    """Round to 4 dp, mapping NaN -> None (stdlib/Starlette JSON rejects NaN)."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if f != f else round(f, 4)
 
 
 def _cells_payload(df):
@@ -165,13 +182,13 @@ def _cells_payload(df):
     disp_cat = pd.Categorical(df["disposition"].fillna("").astype(str),
                               categories=["", "KEEP", "DISCARD", "UNCERTAIN"])
     skip = {"barcode", "umap_x", "umap_y", "subcluster", "disposition",
-            "umap_cluster", "recommended_disposition"}
-    qc = {c: [round(float(v), 4) for v in df[c]] for c in df.columns
+            "umap_cluster", "original_cluster_split", "recommended_disposition"}
+    qc = {c: [_jnum(v) for v in df[c]] for c in df.columns
           if c not in skip and pd.api.types.is_numeric_dtype(df[c])}
     return {
         "n": int(len(df)),
-        "x": [round(float(v), 4) for v in df["umap_x"]],
-        "y": [round(float(v), 4) for v in df["umap_y"]],
+        "x": [_jnum(v) for v in df["umap_x"]],
+        "y": [_jnum(v) for v in df["umap_y"]],
         "parent_cluster": par_cat.codes.tolist(),
         "parent_categories": list(par_cat.categories),
         "subcluster": sub_cat.codes.tolist(),

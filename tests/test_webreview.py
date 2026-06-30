@@ -43,16 +43,22 @@ def _make_run(root):
     pd.DataFrame({"gene": ["A", "B"], "score": [3.1, 2.0]}).to_csv(
         c14 / "deg_c14_1.tsv", sep="\t", index=False)
     (c14 / "minor_profile.png").write_bytes(_PNG)
-    bcs = [f"cell{i}" for i in range(8)]
+    bcs = [f"cell{i}" for i in range(9)]   # cell8 has NaN coord -> dropped
+    # real cell_labels.tsv: `umap_cluster` is the raw u-fragment; the
+    # c{parent}_{minor} subcluster is in `original_cluster_split`.
     pd.DataFrame({"": bcs,
-                  "umap_cluster": ["c14_0", "c14_0", "c14_1", "c14_1",
-                                   "c14_2", "c14_2", "c14_5", "c14_0"],
+                  "umap_cluster": ["u0", "u0", "u1", "u1", "u2", "u2", "u5", "u0", "u0"],
+                  "original_cluster_split": ["c14_0", "c14_0", "c14_1", "c14_1",
+                                             "c14_2", "c14_2", "c14_5", "c14_0", "c14_0"],
                   "recommended_disposition": ["", "", "KEEP", "KEEP",
-                                              "UNCERTAIN", "UNCERTAIN", "", ""],
-                  "proposed_cell_type": [""] * 8}).to_csv(
+                                              "UNCERTAIN", "UNCERTAIN", "", "", ""],
+                  "proposed_cell_type": [""] * 9}).to_csv(
         root / "cell_labels.tsv", sep="\t", index=False)
-    pd.DataFrame({"barcode": bcs, "umap_x": range(8), "umap_y": range(8),
-                  "pct_counts_mt": [0.1] * 8}).to_csv(
+    xs = list(range(8)) + [float("nan")]   # cell8 NaN coord
+    mt = [0.1] * 9
+    mt[6] = float("nan")                    # NaN QC -> JSON null
+    pd.DataFrame({"barcode": bcs, "umap_x": xs, "umap_y": xs,
+                  "pct_counts_mt": mt}).to_csv(
         root / "cell_coords.tsv.gz", sep="\t", index=False, compression="gzip")
 
 
@@ -132,10 +138,12 @@ def test_cells_and_selection(tmp_path):
     _make_run(tmp_path)
     c = _client(tmp_path)
     j = c.get("/api/cells").json()
-    assert j["n"] == 8 and len(j["x"]) == 8 and len(j["y"]) == 8
+    assert j["n"] == 8 and len(j["x"]) == 8 and len(j["y"]) == 8  # cell8 dropped
     assert "c14_1" in j["subcluster_categories"]
+    assert "14" in j["parent_categories"]      # parent parsed from c14_* subcluster
     assert j["disposition_categories"] == ["", "KEEP", "DISCARD", "UNCERTAIN"]
     assert "pct_counts_mt" in j["qc"]
+    assert j["qc"]["pct_counts_mt"][6] is None                    # NaN -> null
     e = c.post("/api/selection/export", json={"label": "foo", "indices": [2, 3]})
     assert e.status_code == 200
     sel = pd.read_csv(tmp_path / "selections" / "selection_foo.tsv", sep="\t")
