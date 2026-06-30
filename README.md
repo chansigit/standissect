@@ -439,8 +439,9 @@ python -m standissect run "$H5AD" \
     --sample-col sample --donor-col donor \
     --doublet-score-col doublet_score --mito-col pct_counts_mt \
     --feature-count-col n_genes_by_counts --umi-count-col total_counts \
-    --resolution 0.5 --min-subcluster-size 50 \
+    --resolution 0.5 --min-subcluster-size 0 \
     --diagnosis-mode llm --discard-confidence-threshold 0.5
+    # --min-subcluster-size 0 = diagnose every off-core fragment (no size floor)
 
 # 2. export per-cell UMAP coordinates for the interactive UMAP
 python -m standissect export-coords "$H5AD" --output-dir "$RUN" \
