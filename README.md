@@ -322,16 +322,26 @@ It needs two optional dependencies (not required by the pipeline):
 pip install fastapi uvicorn          # run in sh_dev, not on the login node
 ```
 
+> The commands below use the **ts-blood** run on Sherlock as a concrete,
+> copy-pasteable example — substitute your own `.h5ad` and output paths. They
+> run `python -m standissect` from the parent of `standissect/`
+> (`/scratch/users/chensj16/projects`) so the package resolves via the current
+> directory; a `PYTHONPATH=…` prefix can break `h5py`'s bundled libraries in
+> this venv, while `cd` + `-m` does not.
+
 **1. (optional) Export per-cell coordinates** for the interactive UMAP. The
 server runs without this — the UMAP tab is simply hidden — but to enable it,
 dump `cell_coords.tsv.gz` once. This reads the `.h5ad` (use `sh_dev`/a job, and
-pass the embedding key your run used — check `params.json` → `umap_key`):
+pass the embedding key your run used — check `params.json` → `umap_key`, which is
+`X_umap_harmony` for this run):
 
 ```bash
 sh_dev
-standissect export-coords your_data.h5ad \
-    --output-dir out/leiden \
-    --umap-key X_umap \
+cd /scratch/users/chensj16/projects          # parent of standissect/
+python -m standissect export-coords \
+    /scratch/users/chensj16/sc-curation-output/ts-blood/Blood_TSP1_30_version2d_10X_smartseq_scvi_Nov122024_dissected.h5ad \
+    --output-dir /scratch/users/chensj16/sc-curation-output/ts-blood/dissect/harmony_leiden \
+    --umap-key X_umap_harmony \
     --doublet-score-col doublet_score --mito-col pct_counts_mt \
     --feature-count-col n_genes_by_counts --umi-count-col total_counts
 ```
@@ -347,14 +357,16 @@ current directory. Avoid a `PYTHONPATH=…` prefix — in some venvs it breaks
 `h5py`'s bundled libraries; `cd`-ing to the parent and using `-m` does not:
 
 ```bash
-sh_dev -t 02:00:00                          # a compute node for the review session
-cd /path/to/parent-of-standissect           # the directory that contains standissect/
-python -m standissect serve out/leiden --host 127.0.0.1 --port 8050
+sh_dev -t 02:00:00                            # a compute node for the review session
+cd /scratch/users/chensj16/projects           # parent of standissect/
+python -m standissect serve \
+    /scratch/users/chensj16/sc-curation-output/ts-blood/dissect/harmony_leiden \
+    --host 127.0.0.1 --port 8050
 # extra flags: --decisions-file PATH (default <root>/human_review.tsv) · --reviewer NAME
 ```
 
-You should see `review server for leiden -> http://127.0.0.1:8050`. Leave it
-running while you review.
+You should see `review server for harmony_leiden -> http://127.0.0.1:8050`. Leave
+it running while you review.
 
 > `sh_dev` caps at 2 h. For a longer session use e.g.
 > `salloc -p normal -t 08:00:00` (or your owner partition) and run the same
@@ -365,11 +377,13 @@ must run on the **same node** as the server. The one-shell recipe — background
 the server, then start ngrok:
 
 ```bash
-ngrok config add-authtoken <YOUR_TOKEN>     # once per machine (get it from dashboard.ngrok.com)
+ngrok config add-authtoken <YOUR_TOKEN>       # once per machine (get it from dashboard.ngrok.com)
 
-cd /path/to/parent-of-standissect
-python -m standissect serve out/leiden --port 8050 &   # background (note the trailing &)
-ngrok http --basic-auth user:pass 8050                 # foreground; ALWAYS set auth — the app has none
+cd /scratch/users/chensj16/projects
+python -m standissect serve \
+    /scratch/users/chensj16/sc-curation-output/ts-blood/dissect/harmony_leiden \
+    --port 8050 &                             # background (note the trailing &)
+ngrok http --basic-auth user:pass 8050        # foreground; ALWAYS set auth — the app has none
 ```
 
 ngrok prints a `Forwarding  https://<random>.ngrok-free.app -> http://localhost:8050`
@@ -385,7 +399,8 @@ interfaces (`--host 0.0.0.0`), find your node with `squeue --me`, then from your
 laptop:
 
 ```bash
-ssh -N -L 8050:<compute-node>:8050 <sunet>@login.sherlock.stanford.edu
+# <compute-node> is the node sh_dev/salloc gave you (e.g. sh02-09n46), from `squeue --me`
+ssh -N -L 8050:<compute-node>:8050 chensj16@login.sherlock.stanford.edu
 # open http://localhost:8050
 ```
 
