@@ -149,3 +149,37 @@ def test_annotation_composition_all_blank_is_empty():
     assert pipeline._annotation_composition_for_subcluster(
         adata, subcluster_col='original_cluster_split', label='c1_0',
         annotation_col='free_annotation') == []
+
+
+def test_dissect_min_subcluster_size_zero_ignores_foreign_labels():
+    # Regression: with --min-subcluster-size 0 the minor filter must still
+    # exclude crosstab columns with 0 cells in this parent (they belong to other
+    # parents and are absent from size_rank_name). Otherwise the 0-count label
+    # slips through and size_rank_name[minor] raises KeyError 'u0'.
+    import numpy as np
+    import pandas as pd
+    import anndata as ad
+    from standissect import cluster
+
+    rng = np.random.default_rng(0)
+    n_main, n_minor = 6, 4
+    X = rng.normal(size=(n_main + n_minor, 5)).astype(np.float32)
+    obs = pd.DataFrame(
+        {'cl': ['0'] * (n_main + n_minor),
+         'u': ['u0'] * n_main + ['u1'] * n_minor},
+        index=[f"cell{i}" for i in range(n_main + n_minor)])
+    adata = ad.AnnData(X=X, obs=obs)
+    adata.var_names = [f"g{j}" for j in range(5)]
+
+    # crosstab row carries a foreign label 'u9' with 0 cells in this parent
+    crosstab_row = pd.Series({'u0': n_main, 'u1': n_minor, 'u9': 0})
+    size_rank_name = {'u0': 'c0_0', 'u1': 'c0_1'}          # present labels only
+
+    res = cluster.dissect_one_cluster(
+        adata, cluster_col='cl', parent='0', umap_label_col='u',
+        crosstab_row=crosstab_row, size_rank_name=size_rank_name,
+        cat_cols=[], qc_cols=[], min_subcluster_size=0)
+
+    subs = [r['subcluster'] for r in res['panel_rows']]
+    assert subs == ['c0_1']                                # u1 only; u9 excluded
+    assert res['minors'] == ['u1']

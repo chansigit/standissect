@@ -267,8 +267,14 @@ def dissect_one_cluster(
     reference_subcluster = f"c{parent}_0"
     main_label = next(u for u, name in size_rank_name.items()
                       if name == reference_subcluster)
+    # ``row`` is the full crosstab row, so it also lists fragments with 0 cells
+    # in this parent (they belong to other parents and are absent from
+    # ``size_rank_name``). Guard on membership so they are never treated as
+    # minors — otherwise ``--min-subcluster-size 0`` lets a 0-count foreign
+    # label through and ``size_rank_name[minor]`` raises KeyError.
     minors = [u for u in row.index
-              if u != main_label and int(row[u]) >= min_subcluster_size]
+              if u != main_label and u in size_rank_name
+              and int(row[u]) >= min_subcluster_size]
 
     mask_parent = (adata.obs[cluster_col].astype(str) == parent).values
     parent_umap = adata.obs[umap_label_col].astype(str).values[mask_parent]
