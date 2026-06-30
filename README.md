@@ -341,16 +341,53 @@ If you point `export-coords` at an `--apply-discard` *cleaned* `.h5ad`, the
 already-discarded cells won't appear; pass the pre-discard input instead to see
 them.
 
-**2. Launch the server:**
+**2. Launch the server** — on a **compute node** (not the login node). Run it
+from the *parent* of `standissect/` so `python -m` finds the package via the
+current directory. Avoid a `PYTHONPATH=…` prefix — in some venvs it breaks
+`h5py`'s bundled libraries; `cd`-ing to the parent and using `-m` does not:
 
 ```bash
-standissect serve out/leiden --host 127.0.0.1 --port 8050
-# flags: --decisions-file PATH (default <root>/human_review.tsv), --reviewer NAME
+sh_dev -t 02:00:00                          # a compute node for the review session
+cd /path/to/parent-of-standissect           # the directory that contains standissect/
+python -m standissect serve out/leiden --host 127.0.0.1 --port 8050
+# extra flags: --decisions-file PATH (default <root>/human_review.tsv) · --reviewer NAME
 ```
 
-Reach it from your browser via an SSH tunnel (`ssh -L 8050:localhost:8050
-<login>`) or a tunnel service. **If you expose it publicly (e.g. ngrok), turn on
-auth** — there is none built in (`ngrok http --basic-auth user:pass 8050`).
+You should see `review server for leiden -> http://127.0.0.1:8050`. Leave it
+running while you review.
+
+> `sh_dev` caps at 2 h. For a longer session use e.g.
+> `salloc -p normal -t 08:00:00` (or your owner partition) and run the same
+> command on the allocated node.
+
+**3. Open it in your browser via ngrok** (public URL, reachable anywhere). ngrok
+must run on the **same node** as the server. The one-shell recipe — background
+the server, then start ngrok:
+
+```bash
+ngrok config add-authtoken <YOUR_TOKEN>     # once per machine (get it from dashboard.ngrok.com)
+
+cd /path/to/parent-of-standissect
+python -m standissect serve out/leiden --port 8050 &   # background (note the trailing &)
+ngrok http --basic-auth user:pass 8050                 # foreground; ALWAYS set auth — the app has none
+```
+
+ngrok prints a `Forwarding  https://<random>.ngrok-free.app -> http://localhost:8050`
+line. Open that HTTPS URL, log in with the `user:pass` you chose, and you're in.
+When done: `kill %1` stops the backgrounded server, `Ctrl-C` stops ngrok.
+
+The app has **no authentication of its own**, so never expose it without
+`--basic-auth` (anyone with the URL could otherwise read your run and write
+decision files).
+
+**Alternative — SSH tunnel** (no third party). Bind the server to all
+interfaces (`--host 0.0.0.0`), find your node with `squeue --me`, then from your
+laptop:
+
+```bash
+ssh -N -L 8050:<compute-node>:8050 <sunet>@login.sherlock.stanford.edu
+# open http://localhost:8050
+```
 
 **What you can do:**
 
