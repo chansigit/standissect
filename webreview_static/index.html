@@ -5,57 +5,40 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>standissect review</title>
   <link rel="stylesheet" href="/static/style.css">
-  <!-- Plotly from CDN (your browser loads it; works fine over an SSH tunnel / ngrok).
-       To run fully offline instead, drop plotly-2.35.2.min.js into webreview_static/
-       and point this src at /static/plotly.min.js. -->
+  <!-- Plotly from CDN (your browser loads it; works over an SSH tunnel / ngrok).
+       To run fully offline, drop plotly-2.35.2.min.js into webreview_static/ and
+       point this src at /static/plotly.min.js. -->
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
 </head>
 <body>
-  <div id="topbar">
-    <span class="brand">standissect&nbsp;review</span>
+  <header id="topbar">
+    <span class="brand">standissect<span class="brand-dim">·review</span></span>
     <span id="runroot" class="runroot"></span>
     <span class="spacer"></span>
-    <div id="viewtoggle" class="toggle">
-      <button data-view="dashboard" class="active">Dashboard</button>
-      <button data-view="umap" id="umapBtn" hidden>Interactive UMAP</button>
+    <div class="progwrap" title="minors decided">
+      <span id="progtext" class="progtext"></span>
+      <div class="progbar"><div id="progfill" class="progfill"></div></div>
     </div>
-    <span id="progress" class="progress"></span>
+  </header>
+
+  <div id="layout">
+    <nav id="sidebar"></nav>
+    <main id="main"><div id="clusterbox"></div></main>
   </div>
 
-  <div id="sidebar"></div>
-
-  <div id="main">
-    <!-- dashboard view -->
-    <div id="dashboard"></div>
-
-    <!-- umap view -->
-    <div id="umapview" hidden>
-      <div class="umapbar">
-        <label>Cluster focus:
-          <select id="focusSelect"></select>
-        </label>
-        <label>Minor:
-          <select id="minorSelect"></select>
-        </label>
-        <span class="hint">Use the lasso / box tool (top-right of the plot) to select cells.</span>
-      </div>
-      <div id="umap"></div>
+  <aside id="selpanel" hidden>
+    <div class="sel-head">
+      <span class="sel-title">Lasso selection</span>
+      <span id="selcount" class="sel-count"></span>
+      <button class="sel-x" onclick="closeSel()" aria-label="close">×</button>
     </div>
-  </div>
-
-  <!-- selection panel (umap) -->
-  <div id="selpanel" hidden>
-    <div class="selhead">
-      <b>Selection</b> <span id="selcount"></span>
-      <button class="x" onclick="closeSel()">×</button>
+    <div id="selstats" class="sel-stats"></div>
+    <div class="sel-actions">
+      <button class="btn ghost" onclick="exportSel()">Export barcodes</button>
+      <button class="btn discard" onclick="manualSel('DISCARD')">Manual discard</button>
+      <button class="btn keep" onclick="manualSel('KEEP')">Manual keep</button>
     </div>
-    <div id="selstats"></div>
-    <div class="selactions">
-      <button onclick="exportSel()">Export barcodes</button>
-      <button class="discard" onclick="manualSel('DISCARD')">Manual DISCARD</button>
-      <button class="keep" onclick="manualSel('KEEP')">Manual KEEP</button>
-    </div>
-  </div>
+  </aside>
 
   <div id="toast"></div>
 

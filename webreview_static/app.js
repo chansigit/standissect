@@ -1,12 +1,12 @@
 "use strict";
-// standissect review — interactive dashboard + UMAP lasso review.
+// standissect review — dashboard with inline interactive UMAPs + lasso review.
 
-const STATE = {run: null, cid: null, cells: null, view: "dashboard",
-               selIndices: []};
+const STATE = {run: null, cid: null, cells: null, selIndices: []};
 const PALETTE = ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f",
   "#edc948", "#b07aa1", "#ff9da7", "#9c755f", "#bab0ac", "#1f77b4", "#d62728",
   "#2ca02c", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"];
 
+// ---------------------------------------------------------------- tiny helpers
 function el(tag, attrs, ...kids) {
   const e = document.createElement(tag);
   for (const k in (attrs || {})) {
@@ -22,7 +22,7 @@ function el(tag, attrs, ...kids) {
 async function api(path, opts) {
   const r = await fetch(path, opts);
   if (!r.ok) {
-    let msg = r.status + "";
+    let msg = String(r.status);
     try { msg = (await r.json()).detail || msg; } catch (e) {}
     throw new Error(msg);
   }
@@ -33,177 +33,195 @@ function toast(msg, isErr) {
   const t = document.getElementById("toast");
   t.textContent = msg; t.className = "show" + (isErr ? " err" : "");
   clearTimeout(_toastT);
-  _toastT = setTimeout(() => { t.className = ""; }, 2600);
+  _toastT = setTimeout(() => { t.className = ""; }, 2800);
+}
+function causeClass(c) {
+  c = (c || "").toLowerCase();
+  if (c.includes("biology")) return "biology";
+  if (c.includes("doublet")) return "doublet";
+  if (c.includes("shallow")) return "shallow";
+  if (c.includes("sample") || c.includes("batch") || c.includes("donor")) return "sample";
+  return "";
 }
 
-// ----------------------------------------------------------------- init
+// ---------------------------------------------------------------- init
 async function init() {
   STATE.run = await api("/api/run");
   document.getElementById("runroot").textContent = STATE.run.root;
-  if (STATE.run.has_coords) document.getElementById("umapBtn").hidden = false;
   renderSidebar();
   setProgress();
-  document.querySelectorAll("#viewtoggle button").forEach(b =>
-    b.addEventListener("click", () => showView(b.dataset.view)));
   if (STATE.run.clusters.length) loadCluster(STATE.run.clusters[0].cid);
 }
 
 function setProgress() {
   const t = STATE.run.totals;
-  document.getElementById("progress").textContent =
-    `decided ${t.decided}/${t.minors}`;
+  document.getElementById("progtext").textContent = `${t.decided} / ${t.minors} decided`;
+  document.getElementById("progfill").style.width =
+    (t.minors ? (100 * t.decided / t.minors) : 0) + "%";
 }
 
 function renderSidebar() {
   const sb = document.getElementById("sidebar");
   sb.innerHTML = "";
+  sb.append(el("div", {class: "side-title"}, "Clusters"));
   for (const c of STATE.run.clusters) {
     const done = c.n_minors > 0 && c.n_decided === c.n_minors;
-    const a = el("a", {class: (done ? "done " : "") + (c.cid === STATE.cid ? "active" : ""),
-                       onclick: () => loadCluster(c.cid)},
-      el("span", {}, `c${c.cid}${c.core_name ? " · " + c.core_name : ""}`),
-      el("span", {class: "badge"}, `${c.n_decided}/${c.n_minors}`));
-    a.dataset.cid = c.cid;
-    sb.append(a);
+    sb.append(el("a", {
+      class: "side-item" + (done ? " done" : "") + (c.cid === STATE.cid ? " active" : ""),
+      onclick: () => loadCluster(c.cid)},
+      el("span", {class: "dot"}),
+      el("span", {class: "nm"}, `c${c.cid}${c.core_name ? " · " + c.core_name : ""}`),
+      el("span", {class: "badge"}, `${c.n_decided}/${c.n_minors}`)));
   }
 }
 
-// ----------------------------------------------------------------- dashboard
+// ---------------------------------------------------------------- cluster panel
 async function loadCluster(cid) {
   STATE.cid = cid;
   renderSidebar();
-  showView("dashboard");
-  const main = document.getElementById("dashboard");
-  main.innerHTML = "<p class='muted'>loading…</p>";
+  const box = document.getElementById("clusterbox");
+  box.innerHTML = "<p class='muted'>loading…</p>";
   let d;
   try { d = await api(`/api/cluster/${cid}`); }
-  catch (e) { main.innerHTML = `<p class='muted'>error: ${e.message}</p>`; return; }
-  renderCluster(d);
+  catch (e) { box.innerHTML = `<p class='muted'>error: ${e.message}</p>`; return; }
+  if (STATE.cid === cid) renderCluster(d);
 }
 
 function renderCluster(d) {
-  const main = document.getElementById("dashboard");
-  main.innerHTML = "";
-  main.append(el("h2", {}, `cluster ${d.cid}${d.core_name ? " — " + d.core_name : ""}`));
-  if (d.narrative) main.append(el("p", {class: "narrative"}, d.narrative));
+  const box = document.getElementById("clusterbox");
+  box.innerHTML = "";
 
-  const imgrow = el("div", {class: "imgrow"});
-  for (const [key, cap] of [["minor_profile", "minor-profile heatmap"],
-                            ["umap_subcluster", "UMAP zoom"]]) {
-    if (d.images[key]) {
-      const img = el("img", {src: `/api/image/${d.cid}/${key}`, loading: "lazy"});
-      img.addEventListener("error", () => { img.style.display = "none"; });
-      imgrow.append(el("figure", {}, el("figcaption", {}, cap), img));
-    }
+  const head = el("div", {class: "panel-head"},
+    el("div", {class: "crumb"}, `cluster ${d.cid}`),
+    el("h2", {}, d.core_name || `cluster ${d.cid}`));
+  if (d.narrative) head.append(el("p", {class: "narrative"}, d.narrative));
+  box.append(head);
+
+  // heatmap (static) + interactive UMAPs (replacing the old static "UMAP zoom")
+  const viz = el("div", {class: "viz"});
+  if (d.images.minor_profile) {
+    const img = el("img", {src: `/api/image/${d.cid}/minor_profile`, loading: "lazy"});
+    img.addEventListener("error", () => { img.closest("figure").style.display = "none"; });
+    viz.append(el("figure", {}, el("figcaption", {}, "Minor-profile heatmap"), img));
   }
-  if (imgrow.children.length) main.append(imgrow);
+  if (STATE.run.has_coords) {
+    viz.append(el("figure", {},
+      el("figcaption", {}, "Global — all clusters"),
+      el("div", {id: "umapGlobal", class: "plot loading"}, "loading cells…")));
+    const minorSel = el("select", {id: "minorSel",
+      onchange: () => drawLocal(d.cid, minorSel.value)});
+    viz.append(el("figure", {},
+      el("figcaption", {}, el("span", {}, `Local — cluster ${d.cid}`),
+        el("span", {class: "hl-sel"}, "highlight ", minorSel)),
+      el("div", {id: "umapLocal", class: "plot"})));
+    box.append(viz);
+    drawClusterUmaps(d.cid);
+  } else {
+    if (d.images.umap_subcluster) {
+      const img = el("img", {src: `/api/image/${d.cid}/umap_subcluster`, loading: "lazy"});
+      img.addEventListener("error", () => { img.closest("figure").style.display = "none"; });
+      viz.append(el("figure", {}, el("figcaption", {}, "UMAP zoom"), img));
+    }
+    box.append(viz);
+  }
 
-  if (!d.minors.length) main.append(el("p", {class: "muted"}, "no diagnosed minor subclusters."));
-  for (const m of d.minors) main.append(renderMinor(m, d.cid));
+  // minors
+  box.append(el("div", {class: "section-title"}, "Minor subclusters",
+    el("span", {class: "count"}, String(d.minors.length))));
+  if (!d.minors.length)
+    box.append(el("p", {class: "muted"}, "No diagnosed minor subclusters in this cluster."));
+  for (const m of d.minors) box.append(renderMinor(m, d.cid));
 
+  // read-only fragments
   if (d.others.length) {
-    const box = el("div", {class: "othersbox"},
-      el("div", {class: "muted"}, "core + below-threshold fragments (not individually reviewable):"));
+    box.append(el("div", {class: "section-title"}, "Core + below-threshold fragments",
+      el("span", {class: "count"}, "read-only")));
     const wrap = el("div", {class: "others"});
     for (const o of d.others)
-      wrap.append(el("span", {class: "ro " + (o.kind === "core" ? "core" : "")},
-        `${o.subcluster} · ${o.n_cells} cells${o.kind === "core" ? " · core" : " · below min size"}`));
+      wrap.append(el("span", {class: "chip" + (o.kind === "core" ? " core" : "")},
+        `${o.subcluster} · ${o.n_cells}${o.kind === "core" ? " · core" : " · <min size"}`));
     box.append(wrap);
-    main.append(box);
   }
 }
 
 function renderMinor(m, cid) {
   const card = el("div", {class: "minor"});
-  const setDim = () => card.classList.toggle("dimmed",
-    m.human_disposition === "DISCARD");
+  const applyState = () => {
+    card.classList.remove("v-keep", "v-discard", "v-uncertain");
+    if (m.human_disposition) card.classList.add("v-" + m.human_disposition.toLowerCase());
+  };
 
   const conf = m.diagnosis_confidence != null ? ` · conf ${m.diagnosis_confidence}` : "";
   const frac = m.frac_of_parent != null ? ` · ${(m.frac_of_parent * 100).toFixed(1)}%` : "";
-  const llm = el("span", {class: "llm", html:
-    `LLM: <b>${m.recommended_disposition || "—"}</b>${m.likely_cause ? " (" + m.likely_cause + ")" : ""}`});
 
-  const btns = el("div", {class: "btns"});
-  const mk = (label, val, cls) => {
-    const b = el("button", {class: cls + (m.human_disposition === val ? " on" : ""),
-      onclick: () => decide(val)}, label);
-    return b;
-  };
-  const bK = mk("KEEP", "KEEP", "keep"), bD = mk("DISCARD", "DISCARD", "discard"),
-        bU = mk("UNCERTAIN", "UNCERTAIN", "uncertain");
-  btns.append(bK, bD, bU);
+  const verdict = el("div", {class: "verdict"});
+  const mk = (label, val, cls) => el("button", {
+    class: cls + (m.human_disposition === val ? " on" : ""),
+    onclick: () => decide(val)}, label);
+  const bK = mk("Keep", "KEEP", "keep"), bD = mk("Discard", "DISCARD", "discard"),
+        bU = mk("Uncertain", "UNCERTAIN", "uncertain");
+  verdict.append(bK, bD, bU);
 
-  const noteInput = el("input", {class: "note", placeholder: "note…", value: m.note || ""});
-  noteInput.addEventListener("blur", () => {
-    if (m.human_disposition) decide(m.human_disposition, true);
-  });
+  const note = el("input", {class: "note", placeholder: "note…", value: m.note || ""});
+  note.addEventListener("blur", () => { if (m.human_disposition) decide(m.human_disposition, true); });
 
   async function decide(val, noteOnly) {
-    const newVal = (!noteOnly && m.human_disposition === val) ? "" : val; // toggle off
+    const newVal = (!noteOnly && m.human_disposition === val) ? "" : val;
     try {
       const r = await api("/api/decision", {method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({subcluster: m.subcluster, disposition: newVal,
-                              note: noteInput.value})});
-      m.human_disposition = newVal;
-      m.note = noteInput.value;
+        body: JSON.stringify({subcluster: m.subcluster, disposition: newVal, note: note.value})});
+      m.human_disposition = newVal; m.note = note.value;
       for (const [b, v] of [[bK, "KEEP"], [bD, "DISCARD"], [bU, "UNCERTAIN"]])
         b.classList.toggle("on", newVal === v);
-      setDim();
+      applyState();
       STATE.run.totals = r.progress;
       const cl = STATE.run.clusters.find(c => c.cid === cid);
-      if (cl) { // recount decided for this cluster from the DOM
-        cl.n_decided = document.querySelectorAll("#dashboard .minor .btns button.on").length;
-      }
+      if (cl) cl.n_decided = document.querySelectorAll("#clusterbox .verdict button.on").length;
       renderSidebar(); setProgress();
       if (!noteOnly) toast(newVal ? `${m.subcluster} → ${newVal}` : `${m.subcluster} cleared`);
     } catch (e) { toast("save failed: " + e.message, true); }
   }
 
-  const adopt = m.recommended_disposition
-    ? el("span", {class: "adopt", onclick: () => decide(m.recommended_disposition)}, "adopt LLM")
-    : null;
-
-  const row1 = el("div", {class: "row1"},
+  const top = el("div", {class: "minor-top"},
     el("span", {class: "sc"}, m.subcluster),
+    m.likely_cause ? el("span", {class: "cause " + causeClass(m.likely_cause)}, m.likely_cause) : null,
     el("span", {class: "meta"}, `${m.n_cells != null ? m.n_cells + " cells" : ""}${frac}${conf}`),
-    m.likely_cause ? el("span", {class: "cause"}, m.likely_cause) : null,
-    llm, adopt,
-    el("span", {class: "spacerflex"}),
-    btns);
-  card.append(row1, noteInput);
+    el("span", {class: "grow"}),
+    el("span", {class: "llm", html: `LLM&nbsp;→&nbsp;<b>${m.recommended_disposition || "—"}</b>`}),
+    verdict);
 
-  // expandable detail (rationale + DEG/QC + compare-on-umap)
+  const actions = el("div", {class: "minor-actions"});
+  if (m.recommended_disposition)
+    actions.append(el("a", {class: "link", onclick: () => decide(m.recommended_disposition)}, "adopt LLM"));
+  if (STATE.run.has_coords)
+    actions.append(el("a", {class: "link", onclick: () => showOnUmap(cid, m.subcluster)}, "show on UMAP"));
   const detail = el("div", {class: "detail"});
-  const expander = el("span", {class: "expand", onclick: () => {
+  const expander = el("a", {class: "link", onclick: () => {
     detail.classList.toggle("open");
     if (detail.classList.contains("open") && !detail.dataset.loaded) fillDetail();
-  }}, "▸ details (rationale · DEG · QC)");
-  card.append(expander, detail);
+  }}, "details");
+  actions.append(expander, note);
 
   async function fillDetail() {
     detail.dataset.loaded = "1";
-    if (m.diagnosis_rationale)
-      detail.append(el("div", {class: "rationale"}, m.diagnosis_rationale));
+    if (m.diagnosis_rationale) detail.append(el("div", {class: "rationale"}, m.diagnosis_rationale));
     if (m.proposed_cell_type)
-      detail.append(el("div", {}, el("span", {class: "k muted"}, "proposed: "), m.proposed_cell_type));
-    if (STATE.run.has_coords)
-      detail.append(el("span", {class: "adopt", onclick: () =>
-        focusOnUmap(cid, m.subcluster)}, "compare vs core on UMAP ▶"));
+      detail.append(el("div", {class: "proposed"}, el("b", {}, "proposed: "), m.proposed_cell_type));
     for (const [tbl, cap] of [[m.deg_table, "DEG vs main"], [m.qc_table, "QC drift"]]) {
       if (!tbl) continue;
       const holder = el("div", {});
-      detail.append(el("div", {class: "expand", onclick: async () => {
-        if (holder.dataset.loaded) { holder.innerHTML = ""; holder.dataset.loaded = ""; return; }
-        holder.dataset.loaded = "1";
-        try {
-          const t = await api(`/api/table/${cid}/${tbl}`);
-          holder.append(renderTable(t));
-        } catch (e) { holder.append(el("p", {class: "muted"}, "table error")); }
+      detail.append(el("a", {class: "link", onclick: async () => {
+        if (holder.dataset.open) { holder.innerHTML = ""; holder.dataset.open = ""; return; }
+        holder.dataset.open = "1";
+        try { holder.append(renderTable(await api(`/api/table/${cid}/${tbl}`))); }
+        catch (e) { holder.append(el("p", {class: "muted"}, "table error")); }
       }}, `▸ ${cap}`), holder);
     }
   }
-  setDim();
+
+  card.append(top, actions, detail);
+  applyState();
   return card;
 }
 
@@ -213,45 +231,33 @@ function renderTable(t) {
   for (const row of t.rows)
     tab.append(el("tr", {}, ...t.columns.map(c => {
       let v = row[c];
-      if (typeof v === "number") v = Math.abs(v) < 1e-3 && v !== 0 ? v.toExponential(2)
-        : (Number.isInteger(v) ? v : v.toFixed(3));
+      if (typeof v === "number")
+        v = (Math.abs(v) < 1e-3 && v !== 0) ? v.toExponential(2)
+          : (Number.isInteger(v) ? v : v.toFixed(3));
       return el("td", {}, v == null ? "" : v);
     })));
-  return tab;
+  return el("div", {class: "tbl-wrap"}, tab);
 }
 
-// ----------------------------------------------------------------- view switch
-function showView(view) {
-  STATE.view = view;
-  document.querySelectorAll("#viewtoggle button").forEach(b =>
-    b.classList.toggle("active", b.dataset.view === view));
-  document.getElementById("dashboard").hidden = view !== "dashboard";
-  document.getElementById("umapview").hidden = view !== "umap";
-  if (view === "umap") ensureUmap();
+// ---------------------------------------------------------------- UMAPs
+async function ensureCells() {
+  if (STATE.cells) return true;
+  try { STATE.cells = await api("/api/cells"); return true; }
+  catch (e) { return false; }
 }
 
-// ----------------------------------------------------------------- umap
-async function ensureUmap() {
-  if (!STATE.run.has_coords) return;
-  if (!STATE.cells) {
-    document.getElementById("umap").innerHTML = "<p class='muted'>loading cells…</p>";
-    try { STATE.cells = await api("/api/cells"); }
-    catch (e) { document.getElementById("umap").innerHTML =
-      `<p class='muted'>cells error: ${e.message}</p>`; return; }
-    buildFocusSelectors();
+async function drawClusterUmaps(cid, minor) {
+  if (!(await ensureCells())) {
+    const g = document.getElementById("umapGlobal");
+    if (g) { g.classList.remove("loading"); g.textContent = ""; g.append(el("p", {class: "muted"}, "cells unavailable")); }
+    return;
   }
-  drawUmap();
-}
-
-function buildFocusSelectors() {
-  const fs = document.getElementById("focusSelect");
-  fs.innerHTML = "";
-  fs.append(el("option", {value: ""}, "— global —"));
-  for (const c of STATE.run.clusters)
-    fs.append(el("option", {value: c.cid}, `c${c.cid}${c.core_name ? " · " + c.core_name : ""}`));
-  fs.addEventListener("change", () => { buildMinorSelect(fs.value); drawUmap(); });
-  document.getElementById("minorSelect").addEventListener("change", drawUmap);
-  buildMinorSelect("");
+  if (STATE.cid !== cid) return;                 // user switched away while loading
+  const g = document.getElementById("umapGlobal");
+  if (g) { g.classList.remove("loading"); g.textContent = ""; }
+  fillMinorSelect(cid, minor);
+  drawGlobal(cid);
+  drawLocal(cid, minor || "");
 }
 
 function minorsOf(cid) {
@@ -260,71 +266,98 @@ function minorsOf(cid) {
   return STATE.cells.subcluster_categories
     .filter(s => s.startsWith(pre) && !s.endsWith("_0")).sort();
 }
-
-function buildMinorSelect(cid) {
-  const ms = document.getElementById("minorSelect");
+function fillMinorSelect(cid, sel) {
+  const ms = document.getElementById("minorSel");
+  if (!ms) return;
   ms.innerHTML = "";
-  ms.append(el("option", {value: ""}, "— all —"));
+  ms.append(el("option", {value: ""}, "all minors"));
   for (const s of minorsOf(cid)) ms.append(el("option", {value: s}, s));
+  if (sel) ms.value = sel;
 }
 
-function focusOnUmap(cid, minor) {
-  showView("umap");
-  const setSel = () => {
-    document.getElementById("focusSelect").value = cid;
-    buildMinorSelect(cid);
-    document.getElementById("minorSelect").value = minor || "";
-    drawUmap();
-  };
-  if (STATE.cells) setSel(); else ensureUmap().then(setSel);
+function showOnUmap(cid, minor) {
+  const ms = document.getElementById("minorSel");
+  if (ms) ms.value = minor;
+  drawLocal(cid, minor);
+  const lo = document.getElementById("umapLocal");
+  if (lo) lo.scrollIntoView({behavior: "smooth", block: "center"});
 }
 
-function drawUmap() {
-  const C = STATE.cells; if (!C) return;
-  const focusCid = document.getElementById("focusSelect").value;
-  const focusMinor = document.getElementById("minorSelect").value;
-  const subCats = C.subcluster_categories, parCats = C.parent_categories;
-  const colors = new Array(C.n);
-  let xr = null, yr = null;
-  if (!focusCid) {
-    for (let i = 0; i < C.n; i++) colors[i] = PALETTE[C.parent_cluster[i] % PALETTE.length];
-  } else {
-    const corePref = `c${focusCid}_0`, parPref = `c${focusCid}_`;
-    let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
-    for (let i = 0; i < C.n; i++) {
-      const s = subCats[C.subcluster[i]];
-      if (focusMinor && s === focusMinor) colors[i] = "#d62728";
-      else if (s === corePref) colors[i] = "#1f77b4";
-      else if (s.startsWith(parPref)) colors[i] = focusMinor ? "#9bb3d4" : "#d62728";
-      else { colors[i] = "#e2e2e2"; continue; }
-      if (C.x[i] < xmin) xmin = C.x[i]; if (C.x[i] > xmax) xmax = C.x[i];
-      if (C.y[i] < ymin) ymin = C.y[i]; if (C.y[i] > ymax) ymax = C.y[i];
-    }
-    if (xmin < xmax) {
-      const px = (xmax - xmin) * 0.08, py = (ymax - ymin) * 0.08;
-      xr = [xmin - px, xmax + px]; yr = [ymin - py, ymax + py];
-    }
+// equal x/y span centred on the kept points → with scaleanchor below, a true 1:1 UMAP
+function _squareRange(C, keep) {
+  let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
+  for (let i = 0; i < C.n; i++) {
+    if (keep && !keep(i)) continue;
+    const x = C.x[i], y = C.y[i];
+    if (x == null || y == null) continue;
+    if (x < xmin) xmin = x; if (x > xmax) xmax = x;
+    if (y < ymin) ymin = y; if (y > ymax) ymax = y;
   }
+  if (!(xmin <= xmax)) return [undefined, undefined];
+  const cx = (xmin + xmax) / 2, cy = (ymin + ymax) / 2;
+  const half = (Math.max(xmax - xmin, ymax - ymin) / 2) * 1.06 || 1;
+  return [[cx - half, cx + half], [cy - half, cy + half]];
+}
+
+function _renderUmap(divId, colors, sizes, xr, yr) {
+  const C = STATE.cells;
+  const subCats = C.subcluster_categories;
   const trace = {
     type: "scattergl", mode: "markers", x: C.x, y: C.y,
     text: C.subcluster.map(c => subCats[c]),
     hovertemplate: "%{text}<extra></extra>",
-    marker: {size: focusCid ? 4 : 3, color: colors, opacity: 0.8},
+    marker: {size: sizes, color: colors, opacity: 0.82},
   };
   const layout = {
-    margin: {l: 30, r: 10, t: 10, b: 30}, dragmode: "lasso", hovermode: "closest",
-    xaxis: {title: "UMAP1", range: xr, zeroline: false},
-    yaxis: {title: "UMAP2", range: yr, zeroline: false},
-    showlegend: false,
+    margin: {l: 34, r: 8, t: 6, b: 30}, dragmode: "lasso", hovermode: "closest",
+    paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
+    xaxis: {range: xr, zeroline: false, showticklabels: false, constrain: "domain"},
+    yaxis: {range: yr, zeroline: false, showticklabels: false,
+            scaleanchor: "x", scaleratio: 1, constrain: "domain"},
+    showlegend: false, font: {family: "ui-sans-serif, system-ui, sans-serif", size: 11},
   };
-  const gd = document.getElementById("umap");
-  Plotly.react(gd, [trace], layout,
-    {responsive: true, displaylogo: false, modeBarButtonsToRemove: ["autoScale2d"]});
+  const gd = document.getElementById(divId);
+  if (!gd) return;
+  Plotly.react(gd, [trace], layout, {
+    responsive: true, displaylogo: false, scrollZoom: true,
+    modeBarButtonsToRemove: ["autoScale2d", "select2d"],
+  });
   gd.removeAllListeners && gd.removeAllListeners("plotly_selected");
   gd.on("plotly_selected", onSelected);
   gd.on("plotly_deselect", closeSel);
 }
 
+// global: every cell coloured by parent cluster; current cluster's cells enlarged.
+function drawGlobal(highlightCid) {
+  const C = STATE.cells; if (!C) return;
+  const hc = highlightCid != null ? String(highlightCid) : null;
+  const colors = new Array(C.n), sizes = new Array(C.n);
+  for (let i = 0; i < C.n; i++) {
+    colors[i] = PALETTE[C.parent_cluster[i] % PALETTE.length];
+    sizes[i] = (hc != null && C.parent_categories[C.parent_cluster[i]] === hc) ? 6 : 2.5;
+  }
+  const [xr, yr] = _squareRange(C, null);
+  _renderUmap("umapGlobal", colors, sizes, xr, yr);
+}
+
+// local: zoomed to one cluster — chosen minor red, core blue, sibling minors pale.
+function drawLocal(focusCid, focusMinor) {
+  const C = STATE.cells; if (!C || !focusCid) return;
+  const subCats = C.subcluster_categories;
+  const corePref = `c${focusCid}_0`, parPref = `c${focusCid}_`;
+  const colors = new Array(C.n);
+  for (let i = 0; i < C.n; i++) {
+    const s = subCats[C.subcluster[i]];
+    if (focusMinor && s === focusMinor) colors[i] = "#dc2626";
+    else if (s === corePref) colors[i] = "#2563eb";
+    else if (s.startsWith(parPref)) colors[i] = focusMinor ? "#a8b6e0" : "#dc2626";
+    else colors[i] = "#e3e6ee";
+  }
+  const [xr, yr] = _squareRange(C, i => subCats[C.subcluster[i]].startsWith(parPref));
+  _renderUmap("umapLocal", colors, 4, xr, yr);
+}
+
+// ---------------------------------------------------------------- selection
 function onSelected(ev) {
   if (!ev || !ev.points || !ev.points.length) { closeSel(); return; }
   STATE.selIndices = ev.points.map(p => p.pointNumber);
@@ -339,16 +372,16 @@ function showSelStats() {
     const s = C.subcluster_categories[C.subcluster[i]];
     const d = C.disposition_categories[C.disposition[i]] || "(none)";
     bySub[s] = (bySub[s] || 0) + 1;
-    byDisp[d] = (byDisp[d] || 0) + 1;
+    byDisp[d || "(none)"] = (byDisp[d || "(none)"] || 0) + 1;
   }
   const box = document.getElementById("selstats");
   box.innerHTML = "";
-  const subSorted = Object.entries(bySub).sort((a, b) => b[1] - a[1]).slice(0, 12);
-  box.append(el("div", {class: "k"}, "by subcluster:"));
+  box.append(el("div", {class: "k"}, "Top subclusters"));
   const t1 = el("table", {});
-  for (const [s, n] of subSorted) t1.append(el("tr", {}, el("td", {}, s), el("td", {}, n)));
+  for (const [s, n] of Object.entries(bySub).sort((a, b) => b[1] - a[1]).slice(0, 10))
+    t1.append(el("tr", {}, el("td", {}, s), el("td", {}, n)));
   box.append(t1);
-  box.append(el("div", {class: "k"}, "by LLM disposition:"));
+  box.append(el("div", {class: "k"}, "LLM disposition"));
   const t2 = el("table", {});
   for (const [d, n] of Object.entries(byDisp).sort((a, b) => b[1] - a[1]))
     t2.append(el("tr", {}, el("td", {}, d), el("td", {}, n)));
@@ -358,7 +391,7 @@ function showSelStats() {
     if (!vals.length) continue;
     const med = vals[Math.floor(vals.length / 2)];
     box.append(el("div", {class: "k"},
-      `${key}: min ${vals[0].toFixed(3)} · med ${med.toFixed(3)} · max ${vals[vals.length - 1].toFixed(3)}`));
+      `${key}: ${vals[0].toFixed(2)} / ${med.toFixed(2)} / ${vals[vals.length - 1].toFixed(2)} (min·med·max)`));
   }
   document.getElementById("selpanel").hidden = false;
 }
@@ -370,7 +403,7 @@ function closeSel() {
 
 async function exportSel() {
   if (!STATE.selIndices.length) return;
-  const label = prompt("Name this selection (file: selections/selection_<name>.tsv):", "selection");
+  const label = prompt("Name this selection (→ selections/selection_<name>.tsv):", "selection");
   if (label == null) return;
   try {
     const r = await api("/api/selection/export", {method: "POST",
