@@ -383,12 +383,17 @@ cd /scratch/users/chensj16/projects
 python -m standissect serve \
     /scratch/users/chensj16/sc-curation-output/ts-blood/dissect/harmony_leiden \
     --port 8050 &                             # background (note the trailing &)
-ngrok http --basic-auth user:pass 8050        # foreground; ALWAYS set auth — the app has none
+ngrok http --basic-auth "user:reviewpass1" 8050   # foreground; ALWAYS set auth — the app has none
+#                          ^login  ^password (8–128 chars; pick your own)
 ```
 
 ngrok prints a `Forwarding  https://<random>.ngrok-free.app -> http://localhost:8050`
-line. Open that HTTPS URL, log in with the `user:pass` you chose, and you're in.
-When done: `kill %1` stops the backgrounded server, `Ctrl-C` stops ngrok.
+line. Open that HTTPS URL, log in with the login/password you chose, and you're
+in. When done: `kill %1` stops the backgrounded server, `Ctrl-C` stops ngrok.
+
+> Recent ngrok prints `Flag --basic-auth has been deprecated` — it still works
+> (just a warning). The password must be **8–128 characters**, or ngrok errors
+> with `ERR_NGROK_360`.
 
 The app has **no authentication of its own**, so never expose it without
 `--basic-auth` (anyone with the URL could otherwise read your run and write
