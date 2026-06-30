@@ -220,7 +220,17 @@ def build_app(root, decisions_file=None, reviewer=""):
 
     @app.get("/", response_class=HTMLResponse)
     def index():
-        return (_STATIC / "index.html").read_text(encoding="utf-8")
+        html = (_STATIC / "index.html").read_text(encoding="utf-8")
+        # cache-bust: version app.js/style.css by mtime so browsers always fetch
+        # the current build, and never cache index.html itself.
+        ver = 0
+        for f in ("app.js", "style.css"):
+            p = _STATIC / f
+            if p.exists():
+                ver = max(ver, int(p.stat().st_mtime))
+        html = (html.replace("/static/app.js", f"/static/app.js?v={ver}")
+                    .replace("/static/style.css", f"/static/style.css?v={ver}"))
+        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/run")
     def api_run():
