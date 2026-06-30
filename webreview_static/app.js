@@ -105,15 +105,14 @@ function renderCluster(d) {
     viz.append(el("figure", {}, el("figcaption", {}, "Minor-profile heatmap"), img));
   }
   if (STATE.run.has_coords) {
+    const hlSel = el("select", {id: "hlSel",
+      onchange: () => drawUmap(d.cid, hlSel.value)});
     viz.append(el("figure", {},
-      el("figcaption", {}, "Global — all clusters"),
-      el("div", {id: "umapGlobal", class: "plot loading"}, "loading cells…")));
-    const minorSel = el("select", {id: "minorSel",
-      onchange: () => drawLocal(d.cid, minorSel.value)});
-    viz.append(el("figure", {},
-      el("figcaption", {}, el("span", {}, `Local — cluster ${d.cid}`),
-        el("span", {class: "hl-sel"}, "highlight ", minorSel)),
-      el("div", {id: "umapLocal", class: "plot"})));
+      el("figcaption", {}, el("span", {id: "umapcap"}, `UMAP — cluster ${d.cid}`),
+        el("span", {class: "hl-sel"}, "view ", hlSel)),
+      el("div", {id: "umap", class: "plot loading"}, "loading cells…"),
+      el("div", {class: "hint umaphint"},
+        "drag = pan · scroll = zoom · lasso / box tool (top-right) = select · double-click = reset")));
     box.append(viz);
     drawClusterUmaps(d.cid);
   } else {
@@ -246,18 +245,18 @@ async function ensureCells() {
   catch (e) { return false; }
 }
 
-async function drawClusterUmaps(cid, minor) {
+async function drawClusterUmaps(cid) {
   if (!(await ensureCells())) {
-    const g = document.getElementById("umapGlobal");
-    if (g) { g.classList.remove("loading"); g.textContent = ""; g.append(el("p", {class: "muted"}, "cells unavailable")); }
+    const g = document.getElementById("umap");
+    if (g) { g.classList.remove("loading"); g.textContent = "";
+             g.append(el("p", {class: "muted"}, "cells unavailable")); }
     return;
   }
   if (STATE.cid !== cid) return;                 // user switched away while loading
-  const g = document.getElementById("umapGlobal");
+  const g = document.getElementById("umap");
   if (g) { g.classList.remove("loading"); g.textContent = ""; }
-  fillMinorSelect(cid, minor);
-  drawGlobal(cid);
-  drawLocal(cid, minor || "");
+  fillSelect(cid, "");
+  drawUmap(cid, "");
 }
 
 function minorsOf(cid) {
@@ -266,20 +265,23 @@ function minorsOf(cid) {
   return STATE.cells.subcluster_categories
     .filter(s => s.startsWith(pre) && !s.endsWith("_0")).sort();
 }
-function fillMinorSelect(cid, sel) {
-  const ms = document.getElementById("minorSel");
+
+// the dropdown doubles as the view switch: all clusters (global) | all minors | a minor
+function fillSelect(cid, sel) {
+  const ms = document.getElementById("hlSel");
   if (!ms) return;
   ms.innerHTML = "";
-  ms.append(el("option", {value: ""}, "all minors"));
-  for (const s of minorsOf(cid)) ms.append(el("option", {value: s}, s));
-  if (sel) ms.value = sel;
+  ms.append(el("option", {value: "__all__"}, "all clusters (global)"));
+  ms.append(el("option", {value: ""}, `cluster ${cid} · all minors`));
+  for (const s of minorsOf(cid)) ms.append(el("option", {value: s}, `cluster ${cid} · ${s}`));
+  ms.value = sel != null ? sel : "";
 }
 
 function showOnUmap(cid, minor) {
-  const ms = document.getElementById("minorSel");
+  const ms = document.getElementById("hlSel");
   if (ms) ms.value = minor;
-  drawLocal(cid, minor);
-  const lo = document.getElementById("umapLocal");
+  drawUmap(cid, minor);
+  const lo = document.getElementById("umap");
   if (lo) lo.scrollIntoView({behavior: "smooth", block: "center"});
 }
 
@@ -299,68 +301,78 @@ function _squareRange(C, keep) {
   return [[cx - half, cx + half], [cy - half, cy + half]];
 }
 
-function _renderUmap(divId, colors, sizes, xr, yr) {
-  const C = STATE.cells;
-  const subCats = C.subcluster_categories;
+// One scattergl plot. d arrays are z-ordered (drawn last = on top); customdata
+// carries the global cell index so lasso selection maps back regardless of order.
+// Interaction: drag = pan, wheel = zoom, lasso/box tool (top-right) = select,
+// double-click = reset.
+function _react(d, xr, yr) {
   const trace = {
-    type: "scattergl", mode: "markers", x: C.x, y: C.y,
-    text: C.subcluster.map(c => subCats[c]),
+    type: "scattergl", mode: "markers",
+    x: d.x, y: d.y, text: d.text, customdata: d.cd,
     hovertemplate: "%{text}<extra></extra>",
-    marker: {size: sizes, color: colors, opacity: 0.82},
+    marker: {size: d.sizes, color: d.colors, opacity: 1, line: {width: 0}},
   };
   const layout = {
-    margin: {l: 34, r: 8, t: 6, b: 30}, dragmode: "lasso", hovermode: "closest",
+    margin: {l: 30, r: 8, t: 6, b: 26}, dragmode: "pan", hovermode: "closest",
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
     xaxis: {range: xr, zeroline: false, showticklabels: false, constrain: "domain"},
     yaxis: {range: yr, zeroline: false, showticklabels: false,
             scaleanchor: "x", scaleratio: 1, constrain: "domain"},
     showlegend: false, font: {family: "ui-sans-serif, system-ui, sans-serif", size: 11},
   };
-  const gd = document.getElementById(divId);
+  const gd = document.getElementById("umap");
   if (!gd) return;
   Plotly.react(gd, [trace], layout, {
-    responsive: true, displaylogo: false, scrollZoom: true,
-    modeBarButtonsToRemove: ["autoScale2d", "select2d"],
+    responsive: true, displaylogo: false, scrollZoom: true, doubleClick: "reset",
+    modeBarButtonsToRemove: ["autoScale2d"],
   });
   gd.removeAllListeners && gd.removeAllListeners("plotly_selected");
   gd.on("plotly_selected", onSelected);
   gd.on("plotly_deselect", closeSel);
 }
 
-// global: every cell coloured by parent cluster; current cluster's cells enlarged.
-function drawGlobal(highlightCid) {
+// hl: "__all__" = global (all clusters by colour) | "" = this cluster, all minors
+//     | "cX_k" = this cluster with that minor highlighted on top.
+function drawUmap(cid, hl) {
   const C = STATE.cells; if (!C) return;
-  const hc = highlightCid != null ? String(highlightCid) : null;
-  const colors = new Array(C.n), sizes = new Array(C.n);
-  for (let i = 0; i < C.n; i++) {
-    colors[i] = PALETTE[C.parent_cluster[i] % PALETTE.length];
-    sizes[i] = (hc != null && C.parent_categories[C.parent_cluster[i]] === hc) ? 6 : 2.5;
+  const subCats = C.subcluster_categories, N = C.n;
+  const color = new Array(N), size = new Array(N), z = new Array(N);
+  let keep;
+  if (hl === "__all__") {
+    for (let i = 0; i < N; i++) {
+      color[i] = PALETTE[C.parent_cluster[i] % PALETTE.length]; size[i] = 4; z[i] = 0;
+    }
+    keep = null;
+  } else {
+    const parPref = `c${cid}_`, corePref = `c${cid}_0`;
+    for (let i = 0; i < N; i++) {
+      const s = subCats[C.subcluster[i]];
+      if (!s.startsWith(parPref)) { color[i] = "#d7dbe3"; size[i] = 3; z[i] = 0; } // others: small, below
+      else if (hl && s === hl) { color[i] = "#dc2626"; size[i] = 9; z[i] = 3; }     // highlight: big, top
+      else if (s === corePref) { color[i] = "#2563eb"; size[i] = 6; z[i] = 2; }     // core
+      else { color[i] = hl ? "#a8b6e0" : "#dc2626"; size[i] = 6; z[i] = hl ? 1 : 2; } // sibling minors
+    }
+    keep = i => subCats[C.subcluster[i]].startsWith(parPref);
   }
-  const [xr, yr] = _squareRange(C, null);
-  _renderUmap("umapGlobal", colors, sizes, xr, yr);
-}
-
-// local: zoomed to one cluster — chosen minor red, core blue, sibling minors pale.
-function drawLocal(focusCid, focusMinor) {
-  const C = STATE.cells; if (!C || !focusCid) return;
-  const subCats = C.subcluster_categories;
-  const corePref = `c${focusCid}_0`, parPref = `c${focusCid}_`;
-  const colors = new Array(C.n);
-  for (let i = 0; i < C.n; i++) {
-    const s = subCats[C.subcluster[i]];
-    if (focusMinor && s === focusMinor) colors[i] = "#dc2626";
-    else if (s === corePref) colors[i] = "#2563eb";
-    else if (s.startsWith(parPref)) colors[i] = focusMinor ? "#a8b6e0" : "#dc2626";
-    else colors[i] = "#e3e6ee";
-  }
-  const [xr, yr] = _squareRange(C, i => subCats[C.subcluster[i]].startsWith(parPref));
-  _renderUmap("umapLocal", colors, 4, xr, yr);
+  // stable z-order: low z first (bottom), high z last (top)
+  const order = Array.from({length: N}, (_, i) => i).sort((a, b) => z[a] - z[b]);
+  const d = {
+    x: order.map(i => C.x[i]), y: order.map(i => C.y[i]),
+    colors: order.map(i => color[i]), sizes: order.map(i => size[i]),
+    cd: order, text: order.map(i => subCats[C.subcluster[i]]),
+  };
+  const [xr, yr] = _squareRange(C, keep);
+  _react(d, xr, yr);
+  const cap = document.getElementById("umapcap");
+  if (cap) cap.textContent = hl === "__all__"
+    ? "UMAP — all clusters"
+    : `UMAP — cluster ${cid}` + (hl ? ` · ${hl}` : " · all minors");
 }
 
 // ---------------------------------------------------------------- selection
 function onSelected(ev) {
   if (!ev || !ev.points || !ev.points.length) { closeSel(); return; }
-  STATE.selIndices = ev.points.map(p => p.pointNumber);
+  STATE.selIndices = ev.points.map(p => p.customdata);   // customdata = global index
   showSelStats();
 }
 
