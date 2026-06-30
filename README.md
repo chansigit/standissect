@@ -23,6 +23,7 @@ from scratch; it cleans up and explains a clustering you already have.
 [Dispositions](#recommended-discards--dispositions) ·
 [Re-running](#re-running) ·
 [Output](#output-tree) ·
+[Review UI](#reviewing-a-run-interactively-serve) ·
 [Modules](#modules)
 
 ## Install
@@ -308,6 +309,65 @@ h5ad on disk.
 `panel.tsv` is the headline table — one row per minor across all clusters, with
 its top genes, top drift, and diagnosis. `report.html` is what you actually open.
 
+## Reviewing a run interactively (`serve`)
+
+`report.html` is read-only. To **record your own keep/discard verdicts** per
+minor subcluster — and to lasso-select cells on the UMAP — run the review
+server. It only *reads* the run tree and *writes* decision files; it never opens
+the source `.h5ad`, so it is safe on a login node behind a tunnel.
+
+It needs two optional dependencies (not required by the pipeline):
+
+```bash
+pip install fastapi uvicorn          # run in sh_dev, not on the login node
+```
+
+**1. (optional) Export per-cell coordinates** for the interactive UMAP. The
+server runs without this — the UMAP tab is simply hidden — but to enable it,
+dump `cell_coords.tsv.gz` once. This reads the `.h5ad` (use `sh_dev`/a job, and
+pass the embedding key your run used — check `params.json` → `umap_key`):
+
+```bash
+sh_dev
+standissect export-coords your_data.h5ad \
+    --output-dir out/leiden \
+    --umap-key X_umap \
+    --doublet-score-col doublet_score --mito-col pct_counts_mt \
+    --feature-count-col n_genes_by_counts --umi-count-col total_counts
+```
+
+The UMAP shows the cells present in *both* this `.h5ad` and `cell_labels.tsv`.
+If you point `export-coords` at an `--apply-discard` *cleaned* `.h5ad`, the
+already-discarded cells won't appear; pass the pre-discard input instead to see
+them.
+
+**2. Launch the server:**
+
+```bash
+standissect serve out/leiden --host 127.0.0.1 --port 8050
+# flags: --decisions-file PATH (default <root>/human_review.tsv), --reviewer NAME
+```
+
+Reach it from your browser via an SSH tunnel (`ssh -L 8050:localhost:8050
+<login>`) or a tunnel service. **If you expose it publicly (e.g. ngrok), turn on
+auth** — there is none built in (`ngrok http --basic-auth user:pass 8050`).
+
+**What you can do:**
+
+- per cluster, see each minor's heatmap / UMAP / DEG / QC drift / LLM diagnosis,
+  and click **KEEP / DISCARD / UNCERTAIN** (+ a note); **adopt LLM** copies the
+  model's call. Progress is tracked in the sidebar; decisions autosave and
+  resume across restarts.
+- **compare a minor vs the major (core) cluster** on the interactive UMAP
+  (cluster-focus mode highlights the minor against `_0`).
+- **lasso / box-select** cells to inspect their composition + QC live, **export
+  their barcodes**, or record them as a **manual KEEP/DISCARD set**.
+
+**Outputs (in the run dir):** `human_review.tsv` (per-minor verdicts),
+`manual_cells.tsv` (hand-picked cells), `selections/selection_*.tsv` (exported
+barcode lists). These are decisions only — nothing is deleted; feed them into
+your own `--apply-discard` step if you want a cleaned `.h5ad`.
+
 ## Modules
 
 | module | role |
@@ -315,3 +375,6 @@ its top genes, top drift, and diagnosis. `report.html` is what you actually open
 | `standissect.cluster`  | analysis primitives — UMAP-Leiden partition, per-cluster dissection, vectorised Mann-Whitney DEG, canonical-core markers, minor-profile heatmaps |
 | `standissect.pipeline` | `run_dissect_pipeline` — staged orchestrator, unified output tree, file-existence idempotency |
 | `standissect.report`   | `build_report` — single-file HTML report |
+| `standissect.webreview` | `serve` / `build_app` — interactive review server (dashboard + Plotly UMAP lasso) |
+| `standissect.export_coords` | `export_cell_coords` — per-cell UMAP coords (+QC) → `cell_coords.tsv.gz` |
+| `standissect.review_store` | `ReviewStore` / `ManualStore` — flat-file decision stores |
