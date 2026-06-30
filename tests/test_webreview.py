@@ -157,6 +157,51 @@ def test_heatmap_404_when_no_data(tmp_path):
     assert _client(tmp_path).get("/api/heatmap/99").status_code == 404
 
 
+def _write_expr_h5ad(path):
+    """Tiny log-norm expression h5ad sharing barcodes (cell0..cell8) with the run.
+    G0 high in cell0-3 (group A), G1 high in cell4-7 (group B)."""
+    import anndata as ad
+    import numpy as np
+    import scipy.sparse as sp
+    bcs = [f"cell{i}" for i in range(9)]
+    genes = ["G0", "G1", "G2", "G3"]
+    X = np.zeros((9, 4), dtype=np.float32)
+    X[:4, 0] = 3.0       # G0 up in A (cell0-3)
+    X[4:8, 1] = 3.0      # G1 up in B (cell4-7)
+    X[:, 2] = 1.0        # G2 constant (no DE)
+    adata = ad.AnnData(X=sp.csr_matrix(X),
+                       obs=pd.DataFrame(index=bcs), var=pd.DataFrame(index=genes))
+    adata.write_h5ad(path)
+
+
+def test_deg_between_two_groups(tmp_path):
+    pytest.importorskip("anndata")
+    _make_run(tmp_path)
+    p = tmp_path / "expr.h5ad"
+    _write_expr_h5ad(p)
+    c = _client(tmp_path, h5ad=str(p))
+
+    assert c.get("/api/run").json()["deg_enabled"] is True
+    r = c.post("/api/deg", json={"a": [0, 1, 2, 3], "b": [4, 5, 6, 7], "top_n": 5})
+    assert r.status_code == 200
+    j = r.json()
+    assert (j["n_a"], j["n_b"], j["layer"]) == (4, 4, "X")
+    a_genes = [g["gene"] for g in j["up_in_a"]]
+    b_genes = [g["gene"] for g in j["up_in_b"]]
+    assert "G0" in a_genes and "G1" in b_genes
+    assert all(g["log2fc"] is None or g["log2fc"] > 0 for g in j["up_in_a"])
+    assert all(g["log2fc"] is None or g["log2fc"] < 0 for g in j["up_in_b"])
+    # <2 cells per group -> 400
+    assert c.post("/api/deg", json={"a": [0], "b": [4]}).status_code == 400
+
+
+def test_deg_disabled_without_h5ad(tmp_path):
+    _make_run(tmp_path)
+    c = _client(tmp_path)                       # no --h5ad
+    assert c.get("/api/run").json()["deg_enabled"] is False
+    assert c.post("/api/deg", json={"a": [0, 1], "b": [2, 3]}).status_code == 400
+
+
 def test_index_and_static(tmp_path):
     _make_run(tmp_path)
     c = _client(tmp_path)

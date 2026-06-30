@@ -1,7 +1,8 @@
 "use strict";
 // standissect review — dashboard with inline interactive UMAPs + lasso review.
 
-const STATE = {run: null, cid: null, cells: null, selIndices: [], heat: null, _heatHL: null};
+const STATE = {run: null, cid: null, cells: null, selIndices: [], heat: null,
+  _heatHL: null, degA: null, degB: null};
 const PALETTE = ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f",
   "#edc948", "#b07aa1", "#ff9da7", "#9c755f", "#bab0ac", "#1f77b4", "#d62728",
   "#2ca02c", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"];
@@ -578,6 +579,7 @@ function showSelStats() {
       `${key}: ${vals[0].toFixed(2)} / ${med.toFixed(2)} / ${vals[vals.length - 1].toFixed(2)} (min·med·max)`));
   }
   document.getElementById("selpanel").hidden = false;
+  _syncDegBox();
 }
 
 function closeSel() {
@@ -607,6 +609,67 @@ async function manualSel(disp) {
       body: JSON.stringify({label, indices: STATE.selIndices, disposition: disp})});
     toast(`recorded ${r.n} cells as ${disp} (total ${r.total})`);
   } catch (e) { toast("manual save failed: " + e.message, true); }
+}
+
+// ---------------------------------------------------------------- DEG (A vs B)
+// snapshot the current lasso/click selection into group A or B; compute Mann-
+// Whitney DEG between the two groups server-side (needs serve --h5ad).
+function setDegGroup(which) {
+  if (!STATE.selIndices.length) { toast("select cells first", true); return; }
+  if (which === "a") STATE.degA = STATE.selIndices.slice();
+  else STATE.degB = STATE.selIndices.slice();
+  _syncDegBox();
+  toast(`group ${which.toUpperCase()} = ${STATE.selIndices.length} cells`);
+}
+
+function _syncDegBox() {
+  const box = document.getElementById("degbox");
+  if (!box) return;
+  box.hidden = !(STATE.run && STATE.run.deg_enabled);
+  const ca = document.getElementById("degAchip"), cb = document.getElementById("degBchip");
+  if (ca) ca.textContent = STATE.degA ? `A · ${STATE.degA.length}` : "A —";
+  if (cb) cb.textContent = STATE.degB ? `B · ${STATE.degB.length}` : "B —";
+  const run = document.getElementById("degRun");
+  if (run) run.disabled = !(STATE.degA && STATE.degB);
+}
+
+async function computeDeg() {
+  if (!STATE.degA || !STATE.degB) return;
+  const res = document.getElementById("degResult");
+  res.innerHTML = "<p class='muted'>computing DEG…</p>";
+  try {
+    const d = await api("/api/deg", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({a: STATE.degA, b: STATE.degB, top_n: 25})});
+    renderDeg(d);
+  } catch (e) { res.innerHTML = `<p class='muted'>DEG error: ${e.message}</p>`; }
+}
+
+function _fmtP(p) {
+  if (p == null) return "";
+  return p < 1e-3 ? p.toExponential(1) : p.toFixed(3);
+}
+
+function renderDeg(d) {
+  const res = document.getElementById("degResult");
+  res.innerHTML = "";
+  const note = [`A=${d.n_a}`, `B=${d.n_b}`,
+    d.dropped_overlap ? `overlap −${d.dropped_overlap}` : null,
+    d.dropped_unknown ? `unknown −${d.dropped_unknown}` : null,
+    `layer ${d.layer}`].filter(Boolean).join(" · ");
+  res.append(el("div", {class: "deg-note"}, note));
+  const mk = (title, rows, cls) => {
+    const t = el("table", {class: "tbl deg-tbl"});
+    t.append(el("tr", {}, el("th", {}, title), el("th", {}, "log2FC"), el("th", {}, "padj")));
+    for (const r of rows)
+      t.append(el("tr", {},
+        el("td", {class: "g"}, r.gene),
+        el("td", {}, r.log2fc == null ? "" : r.log2fc.toFixed(2)),
+        el("td", {}, _fmtP(r.padj))));
+    return el("div", {class: "deg-col " + cls}, t);
+  };
+  res.append(el("div", {class: "deg-cols"},
+    mk("↑ in A", d.up_in_a, "a"), mk("↑ in B", d.up_in_b, "b")));
 }
 
 window.addEventListener("DOMContentLoaded", init);

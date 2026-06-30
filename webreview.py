@@ -309,7 +309,68 @@ def _cells_payload(df):
 # --------------------------------------------------------------------------- #
 # app
 # --------------------------------------------------------------------------- #
-def build_app(root, decisions_file=None, reviewer=""):
+def _compute_deg(expr, bcs_a, bcs_b, *, layer=None, top_n=25, cap=1500):
+    """A-vs-B Mann-Whitney DEG on log-normalised expression for two barcode sets.
+
+    ``expr`` is ``(backed AnnData, {barcode: row}, var_names)``. Cells in both
+    groups (overlapping lassos) and barcodes absent from the h5ad are dropped;
+    each group is capped to ``cap`` (random, seeded) to bound latency. Reuses the
+    pipeline's ``wilcoxon_vs_reference`` so results match the tree's deg_*.tsv.
+    Returns top up-in-A / up-in-B genes. Raises ValueError on degenerate input.
+    """
+    import scipy.sparse as sp
+    try:
+        from .cluster import wilcoxon_vs_reference
+    except ImportError:
+        from cluster import wilcoxon_vs_reference
+    adata, bc2row, var_names = expr
+    a = {x for x in bcs_a if x in bc2row}
+    b = {x for x in bcs_b if x in bc2row}
+    common = a & b
+    a -= common
+    b -= common
+    n_unknown = len([x for x in (set(bcs_a) | set(bcs_b)) if x not in bc2row])
+    if len(a) < 2 or len(b) < 2:
+        raise ValueError(
+            "need >=2 cells in each group after removing overlap/unknown barcodes")
+    rng = np.random.default_rng(0)
+
+    def _rows(s):
+        arr = np.array(sorted(bc2row[x] for x in s), dtype=np.int64)
+        if len(arr) > cap:
+            arr = np.sort(rng.choice(arr, cap, replace=False))
+        return arr
+    ra, rb = _rows(a), _rows(b)
+    rows = np.concatenate([ra, rb])
+    labels = np.array(["A"] * len(ra) + ["B"] * len(rb))
+    order = np.argsort(rows, kind="stable")          # backed reads want sorted rows
+    src = adata.layers[layer] if (layer and layer in adata.layers) else adata.X
+    X = sp.csr_matrix(src[rows[order]])
+    # Drop genes expressed in too few of the selected cells: ranking all ~60k
+    # genes is the entire cost of the test, and a gene in <1% of cells can't be a
+    # real marker. Cuts the Wilcoxon ~2-3x with no effect on the top hits.
+    thr = max(3, int(0.01 * X.shape[0]))
+    keep = np.asarray((X != 0).sum(axis=0)).ravel() >= thr
+    if not keep.any():
+        raise ValueError("no genes pass the expression filter for these groups")
+    X = X[:, keep].tocsr()
+    names = [g for g, k in zip(var_names, keep) if k]
+    df = wilcoxon_vs_reference(X, labels[order], group="A", reference="B",
+                               gene_names=names, n_genes=10 ** 9)
+
+    def _fmt(d):
+        return [{"gene": str(r["names"]), "log2fc": _to_float(r["logfoldchanges"]),
+                 "pval": _to_float(r["pvals"]), "padj": _to_float(r["pvals_adj"]),
+                 "score": _to_float(r["scores"])} for _, r in d.iterrows()]
+    up = df[df["logfoldchanges"] > 0].head(top_n)
+    dn = df[df["logfoldchanges"] < 0].sort_values("scores").head(top_n)
+    return {"n_a": int(len(ra)), "n_b": int(len(rb)),
+            "dropped_overlap": int(len(common)), "dropped_unknown": int(n_unknown),
+            "layer": layer or "X", "n_genes": int(len(names)),
+            "up_in_a": _fmt(up), "up_in_b": _fmt(dn)}
+
+
+def build_app(root, decisions_file=None, reviewer="", h5ad=None, deg_layer=None):
     from fastapi import FastAPI, HTTPException
     from fastapi.responses import FileResponse, HTMLResponse
     from fastapi.staticfiles import StaticFiles
@@ -323,6 +384,7 @@ def build_app(root, decisions_file=None, reviewer=""):
     app = FastAPI(title="standissect review")
     app.state.cells = None
     app.state.barcodes = None
+    app.state.expr = None
     app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
 
     @app.get("/", response_class=HTMLResponse)
@@ -341,7 +403,7 @@ def build_app(root, decisions_file=None, reviewer=""):
 
     @app.get("/api/run")
     def api_run():
-        return _run_payload(root, store)
+        return {**_run_payload(root, store), "deg_enabled": bool(h5ad)}
 
     @app.get("/api/cluster/{cid}")
     def api_cluster(cid: str):
@@ -440,6 +502,42 @@ def build_app(root, decisions_file=None, reviewer=""):
         except ValueError as e:
             raise HTTPException(400, str(e))
 
+    # ---- dynamic DEG between two lassoed groups (opt-in via --h5ad) ---- #
+    def _ensure_expr():
+        """Lazily open the DEG h5ad (backed) + build a barcode->row map. Only
+        touched when /api/deg is hit, so the default server never reads an h5ad."""
+        if app.state.expr is None:
+            if not h5ad:
+                return None
+            try:
+                import anndata as ad
+                a = ad.read_h5ad(h5ad, backed="r")
+            except Exception:
+                return None
+            bc2row = {str(bc): i for i, bc in enumerate(a.obs_names)}
+            app.state.expr = (a, bc2row, [str(v) for v in a.var_names])
+        return app.state.expr
+
+    class DegReq(BaseModel):
+        a: list[int]
+        b: list[int]
+        top_n: int = 25
+
+    @app.post("/api/deg")
+    def api_deg(req: DegReq):
+        if not h5ad:
+            raise HTTPException(400, "DEG disabled: restart serve with --h5ad PATH")
+        if not _ensure_cells():
+            raise HTTPException(404, "no cell_coords.tsv.gz")
+        expr = _ensure_expr()
+        if expr is None:
+            raise HTTPException(400, f"could not open DEG h5ad: {h5ad}")
+        try:
+            return _compute_deg(expr, _resolve(req.a), _resolve(req.b),
+                                layer=deg_layer, top_n=max(1, min(100, req.top_n)))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
     return app
 
 
@@ -528,7 +626,7 @@ def _ensure_port_free(host, port, *, wait=8.0):
 
 
 def serve(root, host="127.0.0.1", port=8050, decisions_file=None, reviewer="",
-          replace=True):
+          replace=True, h5ad=None, deg_layer=None):
     try:
         import uvicorn
     except ImportError as e:                       # pragma: no cover
@@ -539,7 +637,11 @@ def serve(root, host="127.0.0.1", port=8050, decisions_file=None, reviewer="",
         raise SystemExit(
             f"[standissect] port {port} is still in use and could not be freed "
             f"(another user's process?). Choose a different --port.")
-    app = build_app(root, decisions_file=decisions_file, reviewer=reviewer)
+    app = build_app(root, decisions_file=decisions_file, reviewer=reviewer,
+                    h5ad=h5ad, deg_layer=deg_layer)
+    if h5ad:
+        print(f"[standissect] DEG enabled — expression from {h5ad}"
+              + (f" (layer={deg_layer})" if deg_layer else " (X)"))
     pf = _pidfile(port)
     try:
         pf.write_text(str(os.getpid()))

@@ -38,6 +38,16 @@
       <button class="btn discard" onclick="manualSel('DISCARD')">Manual discard</button>
       <button class="btn keep" onclick="manualSel('KEEP')">Manual keep</button>
     </div>
+    <div id="degbox" class="sel-deg" hidden>
+      <div class="deg-slots">
+        <button class="btn ghost" onclick="setDegGroup('a')">Set as A</button>
+        <span id="degAchip" class="deg-chip">A —</span>
+        <button class="btn ghost" onclick="setDegGroup('b')">Set as B</button>
+        <span id="degBchip" class="deg-chip">B —</span>
+        <button id="degRun" class="btn deg" onclick="computeDeg()" disabled>DEG&nbsp;A vs B</button>
+      </div>
+      <div id="degResult" class="deg-result"></div>
+    </div>
   </aside>
 
   <div id="toast"></div>

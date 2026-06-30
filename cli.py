@@ -191,7 +191,7 @@ def serve_cmd(args):
     from .webreview import serve
     serve(args.output_root, host=args.host, port=args.port,
           decisions_file=args.decisions_file, reviewer=args.reviewer,
-          replace=not args.no_replace)
+          replace=not args.no_replace, h5ad=args.h5ad, deg_layer=args.deg_layer)
     return 0
 
 
@@ -257,6 +257,16 @@ def build_parser():
                      help='Do not stop an existing server on the same port. By '
                           'default the restart is idempotent: any prior standissect '
                           'server on --port is stopped first.')
+    srv.add_argument('--h5ad',
+                     help='Optional expression .h5ad to enable on-the-fly DEG '
+                          'between two lasso-selected groups. Must share barcodes '
+                          'with the run (obs_names == cell_labels). Opened lazily '
+                          '(backed) only when DEG is requested; the server reads no '
+                          'h5ad otherwise.')
+    srv.add_argument('--deg-layer',
+                     help='Layer in --h5ad holding log-normalised values for DEG. '
+                          'Default: X (use this when lognorm lives in a layer, e.g. '
+                          '"log_normalized").')
     srv.set_defaults(func=serve_cmd)
 
     ec = sub.add_parser('export-coords',
