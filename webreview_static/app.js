@@ -110,9 +110,9 @@ function renderCluster(d) {
     viz.append(el("figure", {},
       el("figcaption", {}, el("span", {id: "umapcap"}, `UMAP — cluster ${d.cid}`),
         el("span", {class: "hl-sel"}, "view ", hlSel)),
-      el("div", {id: "umap", class: "plot loading"}, "loading cells…"),
       el("div", {class: "hint umaphint"},
-        "drag = pan · scroll = zoom · lasso / box tool (top-right) = select · double-click = reset")));
+        "left-drag = pan · right-drag = lasso select · scroll = zoom · double-click = reset"),
+      el("div", {id: "umap", class: "plot loading"}, "loading cells…")));
     box.append(viz);
     drawClusterUmaps(d.cid);
   } else {
@@ -301,17 +301,18 @@ function _squareRange(C, keep) {
   return [[cx - half, cx + half], [cy - half, cy + half]];
 }
 
-// One scattergl plot. d arrays are z-ordered (drawn last = on top); customdata
-// carries the global cell index so lasso selection maps back regardless of order.
-// Interaction: drag = pan, wheel = zoom, lasso/box tool (top-right) = select,
-// double-click = reset.
-function _react(d, xr, yr) {
-  const trace = {
-    type: "scattergl", mode: "markers",
-    x: d.x, y: d.y, text: d.text, customdata: d.cd,
+// Two traces so only the focus is selectable and it draws on top:
+//   trace 0 = background (not selectable; selection styling neutralised)
+//   trace 1 = focus cells of interest (selectable, on top)
+// customdata on each point is the global cell index.
+function _react2(bg, fg, xr, yr) {
+  const mkTrace = (d, neutral) => ({
+    type: "scattergl", mode: "markers", x: d.x, y: d.y, text: d.t, customdata: d.cd,
     hovertemplate: "%{text}<extra></extra>",
-    marker: {size: d.sizes, color: d.colors, opacity: 1, line: {width: 0}},
-  };
+    marker: {size: d.s, color: d.c, opacity: 1, line: {width: 0}},
+    selected: {marker: {opacity: 1}},
+    unselected: {marker: {opacity: neutral ? 1 : 0.15}},
+  });
   const layout = {
     margin: {l: 30, r: 8, t: 6, b: 26}, dragmode: "pan", hovermode: "closest",
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
@@ -322,57 +323,76 @@ function _react(d, xr, yr) {
   };
   const gd = document.getElementById("umap");
   if (!gd) return;
-  Plotly.react(gd, [trace], layout, {
+  Plotly.react(gd, [mkTrace(bg, true), mkTrace(fg, false)], layout, {
     responsive: true, displaylogo: false, scrollZoom: true, doubleClick: "reset",
     modeBarButtonsToRemove: ["autoScale2d"],
   });
   gd.removeAllListeners && gd.removeAllListeners("plotly_selected");
   gd.on("plotly_selected", onSelected);
   gd.on("plotly_deselect", closeSel);
+  bindRightDragLasso(gd);
 }
 
-// hl: "__all__" = global (all clusters by colour) | "" = this cluster, all minors
-//     | "cX_k" = this cluster with that minor highlighted on top.
+// left-drag = pan (default); hold RIGHT button to lasso, release to return to pan.
+let _activeGd = null;
+function bindRightDragLasso(gd) {
+  _activeGd = gd;
+  if (gd._rdrag) return;
+  gd._rdrag = true;
+  gd.addEventListener("mousedown", e => {
+    if (e.button === 2) Plotly.relayout(gd, "dragmode", "lasso");
+  }, true);
+  gd.addEventListener("contextmenu", e => e.preventDefault());
+}
+window.addEventListener("mouseup", e => {
+  if (e.button === 2 && _activeGd && _activeGd._fullLayout &&
+      _activeGd._fullLayout.dragmode === "lasso")
+    Plotly.relayout(_activeGd, "dragmode", "pan");
+});
+
+// hl: "__all__" = all clusters (coloured by cluster) | "" = this cluster, all minors
+//     | "cX_k" = highlight that minor. Every mode zooms to the current cluster and
+//     draws it on top; only the focus (the cluster, or the chosen minor) is selectable.
 function drawUmap(cid, hl) {
   const C = STATE.cells; if (!C) return;
   const subCats = C.subcluster_categories, N = C.n;
-  const color = new Array(N), size = new Array(N), z = new Array(N);
-  let keep;
-  if (hl === "__all__") {
-    for (let i = 0; i < N; i++) {
-      color[i] = PALETTE[C.parent_cluster[i] % PALETTE.length]; size[i] = 4; z[i] = 0;
-    }
-    keep = null;
-  } else {
-    const parPref = `c${cid}_`, corePref = `c${cid}_0`;
-    for (let i = 0; i < N; i++) {
-      const s = subCats[C.subcluster[i]];
-      if (!s.startsWith(parPref)) { color[i] = "#d7dbe3"; size[i] = 3; z[i] = 0; } // others: small, below
-      else if (hl && s === hl) { color[i] = "#dc2626"; size[i] = 9; z[i] = 3; }     // highlight: big, top
-      else if (s === corePref) { color[i] = "#2563eb"; size[i] = 6; z[i] = 2; }     // core
-      else { color[i] = hl ? "#a8b6e0" : "#dc2626"; size[i] = 6; z[i] = hl ? 1 : 2; } // sibling minors
-    }
-    keep = i => subCats[C.subcluster[i]].startsWith(parPref);
+  const parPref = `c${cid}_`, corePref = `c${cid}_0`;
+  const global = (hl === "__all__");
+  const minor = (!global && hl) ? hl : null;
+  const inCluster = i => subCats[C.subcluster[i]].startsWith(parPref);
+  const isFocus = minor ? (i => subCats[C.subcluster[i]] === minor) : inCluster;
+
+  function colorOf(i) {
+    const s = subCats[C.subcluster[i]];
+    if (global) return PALETTE[C.parent_cluster[i] % PALETTE.length];
+    if (!s.startsWith(parPref)) return "#d7dbe3";
+    if (minor) return s === minor ? "#dc2626" : (s === corePref ? "#2563eb" : "#a8b6e0");
+    return s === corePref ? "#2563eb" : "#dc2626";
   }
-  // stable z-order: low z first (bottom), high z last (top)
-  const order = Array.from({length: N}, (_, i) => i).sort((a, b) => z[a] - z[b]);
-  const d = {
-    x: order.map(i => C.x[i]), y: order.map(i => C.y[i]),
-    colors: order.map(i => color[i]), sizes: order.map(i => size[i]),
-    cd: order, text: order.map(i => subCats[C.subcluster[i]]),
-  };
-  const [xr, yr] = _squareRange(C, keep);
-  _react(d, xr, yr);
+  const bg = {x: [], y: [], c: [], s: [], cd: [], t: []};
+  const fg = {x: [], y: [], c: [], s: [], cd: [], t: []};
+  for (let i = 0; i < N; i++) {
+    const foc = isFocus(i);
+    const d = foc ? fg : bg;
+    d.x.push(C.x[i]); d.y.push(C.y[i]); d.c.push(colorOf(i));
+    d.s.push(foc ? (minor ? 9 : 6) : (inCluster(i) ? 6 : 3));
+    d.cd.push(i); d.t.push(subCats[C.subcluster[i]]);
+  }
+  const [xr, yr] = _squareRange(C, inCluster);   // always zoom to the current cluster
+  _react2(bg, fg, xr, yr);
   const cap = document.getElementById("umapcap");
-  if (cap) cap.textContent = hl === "__all__"
-    ? "UMAP — all clusters"
-    : `UMAP — cluster ${cid}` + (hl ? ` · ${hl}` : " · all minors");
+  if (cap) cap.textContent = global
+    ? `UMAP — cluster ${cid} in context (all clusters)`
+    : `UMAP — cluster ${cid}` + (minor ? ` · ${minor}` : " · all minors");
 }
 
 // ---------------------------------------------------------------- selection
 function onSelected(ev) {
-  if (!ev || !ev.points || !ev.points.length) { closeSel(); return; }
-  STATE.selIndices = ev.points.map(p => p.customdata);   // customdata = global index
+  if (!ev || !ev.points) { closeSel(); return; }
+  // only the focus trace (curveNumber 1) is selectable; ignore background cells
+  const pts = ev.points.filter(p => p.curveNumber === 1);
+  if (!pts.length) { closeSel(); return; }
+  STATE.selIndices = pts.map(p => p.customdata);   // customdata = global index
   showSelStats();
 }
 
