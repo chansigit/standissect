@@ -103,6 +103,60 @@ def test_image_and_table(tmp_path):
     assert c.get("/api/table/14/bogus").status_code == 400
 
 
+def _write_heatmap_tsvs(root):
+    c14 = root / "clusters" / "c14"
+    # cores end in _0; minors are c14_k (k>0). FLAT has zero std -> z = NaN -> null.
+    pd.DataFrame({"": ["GENEA", "GENEB", "FLAT"],
+                  "c0_0": [1.0, 4.0, 5.0], "c14_0": [2.0, 3.0, 5.0],
+                  "c14_2": [3.0, 2.0, 5.0], "c14_1": [4.0, 1.0, 5.0]}).to_csv(
+        c14 / "heatmap_data.tsv", sep="\t", index=False)
+    pd.DataFrame({"": ["doublet", "mito"],
+                  "c0_0": [0.1, 0.5], "c14_0": [0.2, 0.4],
+                  "c14_2": [0.3, 0.3], "c14_1": [0.4, 0.2]}).to_csv(
+        c14 / "qc_tracks.tsv", sep="\t", index=False)
+    pd.DataFrame({"": ["sampleA", "sampleB"],
+                  "c0_0": [0.5, 0.5], "c14_0": [0.6, 0.4],
+                  "c14_2": [0.1, 0.9], "c14_1": [0.2, 0.8]}).to_csv(
+        c14 / "sample_composition.tsv", sep="\t", index=False)
+
+
+def test_heatmap_payload(tmp_path):
+    _make_run(tmp_path)
+    _write_heatmap_tsvs(tmp_path)
+    j = _client(tmp_path).get("/api/heatmap/14").json()
+
+    assert j["cid"] == "14" and j["home_core"] == "c14_0"
+    assert (j["n_core"], j["n_minor"]) == (2, 2)
+    assert set(j["cols"]) == {"c0_0", "c14_0", "c14_1", "c14_2"}
+    assert set(j["cols"][:2]) == {"c0_0", "c14_0"}        # cores first
+    assert set(j["cols"][2:]) == {"c14_1", "c14_2"}       # minors after
+    assert set(j["minor_cols"]) == {"c14_1", "c14_2"}
+
+    assert set(j["genes"]) == {"GENEA", "GENEB", "FLAT"}
+    assert len(j["gene_z"]) == 3 and all(len(r) == 4 for r in j["gene_z"])
+    flat = j["gene_z"][j["genes"].index("FLAT")]
+    assert flat == [None, None, None, None]              # zero-std row -> null
+    ga = j["gene_z"][j["genes"].index("GENEA")]
+    assert all(v is not None and -2 <= v <= 2 for v in ga)
+
+    assert set(j["qc_rows"]) == {"doublet", "mito"} and len(j["qc_z"]) == 2
+    assert set(j["sample_rows"]) == {"sampleA", "sampleB"}
+    assert all(0 <= v <= 1 for row in j["sample"] for v in row)   # raw fracs, not z
+
+    for k in ("gene", "qc", "sample"):
+        cs = j["colorscales"][k]
+        assert cs[0][0] == 0.0 and cs[-1][0] == 1.0 and cs[0][1].startswith("rgb(")
+    assert j["ranges"] == {"gene": [-2, 2], "qc": [-2, 2], "sample": [0, 1]}
+
+
+def test_heatmap_404_when_no_data(tmp_path):
+    _make_run(tmp_path)
+    # cluster dir exists but no heatmap_data.tsv -> 404; unknown cluster -> 404
+    (tmp_path / "clusters" / "c30").mkdir()
+    assert _client(tmp_path).get("/api/heatmap/30").status_code == 404
+    assert _client(tmp_path).get("/api/heatmap/99").status_code == 404
+
+
 def test_index_and_static(tmp_path):
     _make_run(tmp_path)
     c = _client(tmp_path)

@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 import time
 
+import numpy as np
 import pandas as pd
 
 try:                       # package use (standissect.webreview)
@@ -54,6 +55,106 @@ def _to_float(v):
 def _parent_of(subcluster):
     m = re.match(r"c?(\d+)_", str(subcluster))
     return m.group(1) if m else str(subcluster)
+
+
+# --------------------------------------------------------------------------- #
+# minor-profile heatmap — rebuilt from the persisted TSVs for an interactive
+# Plotly heatmap that matches minor_profile.png exactly: same z-score, same
+# optimal-leaf ordering, same matplotlib colormaps. No anndata needed.
+# --------------------------------------------------------------------------- #
+def _leaf_order(arr):
+    """Optimal-leaf-ordering of the rows of a 2-D array; rows with any NaN go
+    last in original order (mirrors cluster._cluster_rows/_cluster_columns)."""
+    finite = ~np.isnan(arr).any(axis=1)
+    if int(finite.sum()) < 2:
+        return list(range(arr.shape[0]))
+    from scipy.cluster.hierarchy import linkage, leaves_list
+    idx = np.where(finite)[0]
+    Z = linkage(arr[idx], method="average", metric="euclidean", optimal_ordering=True)
+    order = [int(i) for i in idx[leaves_list(Z)]]
+    order += [i for i in range(arr.shape[0]) if not finite[i]]
+    return order
+
+
+def _cmap_to_plotly(name, n=33):
+    """Sample a matplotlib colormap into a Plotly colorscale (identical colours)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    cmap = matplotlib.colormaps[name]
+    out = []
+    for i in range(n):
+        f = i / (n - 1)
+        r, g, b, _ = cmap(f)
+        out.append([f, f"rgb({int(round(r * 255))},{int(round(g * 255))},{int(round(b * 255))})"])
+    return out
+
+
+def _grid(df):
+    """2-D DataFrame -> list-of-lists of floats with NaN -> None (JSON-safe)."""
+    return [[None if (v is None or (isinstance(v, float) and v != v)) else float(v)
+             for v in row] for row in np.asarray(df.values).tolist()]
+
+
+def _heat_indexed(path):
+    """Read a heatmap TSV (first column is the row index) or return None."""
+    df = _read_tsv_safe(path)
+    if not len(df) or df.shape[1] < 2:
+        return None
+    df = df.set_index(df.columns[0])
+    df.columns = [str(c) for c in df.columns]
+    return df
+
+
+def _heatmap_payload(root, cid):
+    """Rebuild cluster ``cid``'s minor-profile heatmap (gene / QC / sample
+    blocks) from persisted TSVs, ordered + z-scored exactly like the PNG."""
+    cdir = Path(root) / "clusters" / f"c{cid}"
+    mat = _heat_indexed(cdir / "heatmap_data.tsv")
+    if mat is None:
+        return None
+    cols = list(mat.columns)
+    minor_pref = f"c{cid}_"
+    core_names = [c for c in cols if c.endswith("_0")]
+    minor_names = [c for c in cols if c.startswith(minor_pref) and not c.endswith("_0")]
+
+    z = (mat.sub(mat.mean(axis=1), axis=0)
+            .div(mat.std(axis=1).replace(0, np.nan), axis=0).clip(-2, 2))
+    z_fc = z.fillna(0)
+    gene_order = [str(z.index[i]) for i in _leaf_order(z_fc.values)]
+
+    def _ord(names):
+        if len(names) >= 2:
+            return [names[i] for i in _leaf_order(z_fc[names].values.T)]
+        return list(names)
+    ordered_core, ordered_minor = _ord(core_names), _ord(minor_names)
+    col_order = ordered_core + ordered_minor
+    heat = z.reindex(index=gene_order, columns=col_order)
+
+    qc_rows, qc_grid = [], []
+    qc = _heat_indexed(cdir / "qc_tracks.tsv")
+    if qc is not None:
+        qcz = qc.sub(qc.mean(axis=1), axis=0).div(
+            qc.std(axis=1).replace(0, np.nan), axis=0).reindex(columns=col_order)
+        qc_rows, qc_grid = [str(r) for r in qc.index], _grid(qcz)
+
+    sm_rows, sm_grid = [], []
+    sm = _heat_indexed(cdir / "sample_composition.tsv")
+    if sm is not None:
+        sm = sm.reindex(columns=col_order)
+        sm_rows, sm_grid = [str(r) for r in sm.index], _grid(sm)
+
+    return {
+        "cid": str(cid), "cols": col_order,
+        "home_core": f"c{cid}_0", "minor_cols": ordered_minor,
+        "n_core": len(ordered_core), "n_minor": len(ordered_minor),
+        "genes": gene_order, "gene_z": _grid(heat),
+        "qc_rows": qc_rows, "qc_z": qc_grid,
+        "sample_rows": sm_rows, "sample": sm_grid,
+        "colorscales": {"gene": _cmap_to_plotly("RdBu_r"),
+                        "qc": _cmap_to_plotly("coolwarm"),
+                        "sample": _cmap_to_plotly("magma")},
+        "ranges": {"gene": [-2, 2], "qc": [-2, 2], "sample": [0, 1]},
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -247,6 +348,15 @@ def build_app(root, decisions_file=None, reviewer=""):
         if not (root / "clusters" / f"c{cid}").exists():
             raise HTTPException(404, f"no cluster {cid}")
         return _cluster_payload(root, cid, store)
+
+    @app.get("/api/heatmap/{cid}")
+    def api_heatmap(cid: str):
+        if not (root / "clusters" / f"c{cid}").exists():
+            raise HTTPException(404, f"no cluster {cid}")
+        data = _heatmap_payload(root, cid)
+        if data is None:
+            raise HTTPException(404, "no heatmap data")
+        return data
 
     @app.get("/api/image/{cid}/{name}")
     def api_image(cid: str, name: str):
