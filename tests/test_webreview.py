@@ -218,6 +218,36 @@ def test_expr_feature_plot(tmp_path):
     assert _client(tmp_path).get("/api/expr/G0").status_code == 400   # disabled w/o --h5ad
 
 
+def test_feature_gene_numeric_and_categorical(tmp_path):
+    pytest.importorskip("anndata")
+    import anndata as ad
+    import numpy as np
+    import scipy.sparse as sp
+    _make_run(tmp_path)
+    bcs = [f"cell{i}" for i in range(9)]
+    X = np.zeros((9, 2), dtype=np.float32)
+    X[:4, 0] = 3.0
+    obs = pd.DataFrame({
+        "score": [0.1 * i for i in range(9)],                     # float -> continuous
+        "grp": ["x", "x", "x", "x", "y", "y", "y", "y", "z"],     # object -> categorical
+    }, index=bcs)
+    adata = ad.AnnData(X=sp.csr_matrix(X), obs=obs,
+                       var=pd.DataFrame(index=["G0", "G1"]))
+    p = tmp_path / "f.h5ad"
+    adata.write_h5ad(p)
+    c = _client(tmp_path, h5ad=str(p))
+
+    g = c.get("/api/feature/G0").json()
+    assert g["kind"] == "cont" and g["values"][:4] == [3.0, 3.0, 3.0, 3.0]
+    n = c.get("/api/feature/score").json()
+    assert n["kind"] == "cont" and len(n["values"]) == 8 and n["vmax"] > 0
+    cat = c.get("/api/feature/grp").json()
+    assert cat["kind"] == "cat"
+    assert set(cat["categories"]) == {"x", "y", "z"}
+    assert len(cat["codes"]) == 8
+    assert c.get("/api/feature/NOPE").status_code == 404
+
+
 def test_index_and_static(tmp_path):
     _make_run(tmp_path)
     c = _client(tmp_path)

@@ -2,7 +2,7 @@
 // standissect review — dashboard with inline interactive UMAPs + lasso review.
 
 const STATE = {run: null, cid: null, cells: null, selIndices: [], heat: null,
-  _heatHL: null, degA: null, degB: null, degArm: null, geneExpr: null, degMode: false};
+  _heatHL: null, degA: null, degB: null, degArm: null, feature: null, degMode: false};
 const PALETTE = ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f",
   "#edc948", "#b07aa1", "#ff9da7", "#9c755f", "#bab0ac", "#1f77b4", "#d62728",
   "#2ca02c", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"];
@@ -106,17 +106,23 @@ function renderCluster(d) {
   if (STATE.run.has_coords) {
     const hlSel = el("select", {id: "hlSel",
       onchange: () => drawUmap(d.cid, hlSel.value)});
+    const featBox = STATE.run.deg_enabled
+      ? el("input", {id: "featbox", class: "featbox", placeholder: "colour by gene / obs col…",
+          title: "type a gene name or an .obs column, then Enter",
+          onkeydown: e => { if (e.key === "Enter") showFeature(e.target.value); }})
+      : null;
     viz.append(el("figure", {},
       el("figcaption", {},
         el("span", {id: "umapcap"}, `UMAP — cluster ${d.cid}`),
-        el("span", {class: "hl-sel"}, "view ", hlSel,
+        el("span", {class: "hl-sel"}, "view ", hlSel, featBox,
           STATE.run.deg_enabled
             ? el("button", {class: "deg-open", onclick: openDeg,
                 title: "differential expression between two lassoed groups (all-clusters view)"}, "Lasso DEG")
             : null)),
       el("div", {class: "hint umaphint"},
         "left-drag = pan · hold Shift + drag = lasso · click = select group · scroll = zoom · double-click = reset"),
-      el("div", {id: "umap", class: "plot loading"}, "loading cells…")));
+      el("div", {id: "umap", class: "plot loading"}, "loading cells…"),
+      el("div", {id: "umaplegend", class: "umap-legend", hidden: true})));
     box.append(viz);
     drawHeatmap(d.cid);                 // after viz is in the DOM (getElementById works)
     drawClusterUmaps(d.cid);
@@ -377,7 +383,9 @@ function drawUmap(cid, hl) {
   const minor = (!global && hl) ? hl : null;
   const inCluster = i => subCats[C.subcluster[i]].startsWith(parPref);
   const isFocus = minor ? (i => subCats[C.subcluster[i]] === minor) : inCluster;
-  const gene = STATE.geneExpr;                     // feature-plot mode when set
+  const feat = STATE.feature;                      // feature colouring when set
+  const cont = feat && feat.kind === "cont" ? feat : null;   // gene / numeric obs
+  const cat = feat && feat.kind === "cat" ? feat : null;     // categorical obs
   const degMode = STATE.degMode;                   // show the two DEG groups (A/B)
   const aSet = degMode && STATE.degA ? new Set(STATE.degA) : null;
   const bSet = degMode && STATE.degB ? new Set(STATE.degB) : null;
@@ -396,8 +404,11 @@ function drawUmap(cid, hl) {
     const foc = (degMode && (inA || inB)) || isFocus(i);   // DEG groups draw on top
     const d = foc ? fg : bg;
     let color, size;
-    if (gene) {
-      color = gene.vals[i] == null ? 0 : gene.vals[i];
+    if (cont) {
+      color = cont.vals[i] == null ? 0 : cont.vals[i];
+      size = foc ? (minor ? 9 : 6) : (inCluster(i) ? 6 : 3);
+    } else if (cat) {
+      color = cat.codes[i] == null ? "#d7dbe3" : PALETTE[cat.codes[i] % PALETTE.length];
       size = foc ? (minor ? 9 : 6) : (inCluster(i) ? 6 : 3);
     } else if (degMode) {
       color = inA ? "#111827" : inB ? "#e11d48"            // A = ink, B = crimson
@@ -414,19 +425,34 @@ function drawUmap(cid, hl) {
   // global fits the whole UMAP (so you can lasso across clusters); cluster/minor
   // views zoom to the cluster of interest.
   const [xr, yr] = _squareRange(C, global ? null : inCluster);
-  _react2(bg, fg, xr, yr, gene ? {name: gene.gene, cmax: gene.vmax} : null);
+  _react2(bg, fg, xr, yr, cont ? {name: cont.name, cmax: cont.vmax} : null);
   highlightHeatCols(heatFocusCols(cid, hl));      // sync the heatmap column highlight
+  renderUmapLegend(cat);
   const cap = document.getElementById("umapcap");
   if (cap) {
     cap.textContent = "";
-    if (gene)
-      cap.append(`UMAP · ${gene.gene} expression `,
-        el("a", {class: "gene-clear", onclick: clearGene, title: "back to cluster colours"}, "✕"));
+    if (feat)
+      cap.append(`UMAP · ${feat.name} `,
+        el("a", {class: "gene-clear", onclick: clearFeature, title: "back to cluster colours"}, "✕"));
     else
       cap.append(global
         ? `UMAP — cluster ${cid} in context (all clusters)`
         : `UMAP — cluster ${cid}` + (minor ? ` · ${minor}` : " · all minors"));
   }
+}
+
+// discrete legend for a categorical feature (swatch + label); cleared otherwise.
+function renderUmapLegend(cat) {
+  const lg = document.getElementById("umaplegend");
+  if (!lg) return;
+  lg.innerHTML = "";
+  if (!cat) { lg.hidden = true; return; }
+  lg.hidden = false;
+  cat.categories.forEach((name, i) => {
+    lg.append(el("span", {class: "lg-item"},
+      el("span", {class: "lg-sw", style: `background:${PALETTE[i % PALETTE.length]}`}),
+      String(name)));
+  });
 }
 
 // ---------------------------------------------------------------- heatmap
@@ -791,7 +817,7 @@ function renderDeg(d) {
     for (const r of rows)
       t.append(el("tr", {},
         el("td", {class: "g", title: "colour the UMAP by this gene's expression",
-          onclick: () => showGene(r.gene)}, r.gene),
+          onclick: () => showFeature(r.gene)}, r.gene),
         el("td", {}, r.log2fc == null ? "" : r.log2fc.toFixed(2)),
         el("td", {}, _fmtP(r.padj))));
     return el("div", {class: "deg-col " + cls}, t);
@@ -800,19 +826,27 @@ function renderDeg(d) {
     mk("↑ in A", d.up_in_a, "a"), mk("↑ in B", d.up_in_b, "b")));
 }
 
-// click a gene → colour the UMAP by its (log-norm) expression (a feature plot).
-async function showGene(gene) {
+// colour the UMAP by a gene OR an .obs column (numeric -> continuous Viridis,
+// categorical -> discrete palette + legend). Used by the feature box and by
+// clicking a gene in a DEG result.
+async function showFeature(name) {
+  name = (name || "").trim();
+  if (!name) { clearFeature(); return; }
   try {
-    const d = await api(`/api/expr/${encodeURIComponent(gene)}`);
-    STATE.geneExpr = {gene: d.gene, vals: d.values, vmax: d.vmax || 1};
+    const d = await api(`/api/feature/${encodeURIComponent(name)}`);
+    STATE.feature = d.kind === "cont"
+      ? {name: d.name, kind: "cont", vals: d.values, vmax: d.vmax || 1}
+      : {name: d.name, kind: "cat", codes: d.codes, categories: d.categories};
     if (STATE.cid != null) drawUmap(STATE.cid, currentHl());
-    toast(`UMAP coloured by ${d.gene}`);
-  } catch (e) { toast("gene expr failed: " + e.message, true); }
+    toast(`UMAP coloured by ${d.name}` + (d.kind === "cat" ? ` (${d.categories.length} groups)` : ""));
+  } catch (e) { toast("feature failed: " + e.message, true); }
 }
 
-function clearGene() {
-  if (!STATE.geneExpr) return;
-  STATE.geneExpr = null;
+function clearFeature() {
+  const box = document.getElementById("featbox");
+  if (box) box.value = "";
+  if (!STATE.feature) return;
+  STATE.feature = null;
   if (STATE.cid != null) drawUmap(STATE.cid, currentHl());
 }
 

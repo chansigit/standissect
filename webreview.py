@@ -397,6 +397,40 @@ def _gene_expr(expr, barcodes, gene, *, layer=None):
     return vals, (vmax if vmax > 0 else 1.0)
 
 
+def _feature_payload(expr, barcodes, name, *, layer=None):
+    """Colour source for the UMAP, aligned to ``barcodes``: a gene (continuous),
+    a numeric obs column (continuous), or a categorical obs column (discrete).
+    Returns a dict with ``kind`` in {'cont','cat'} or None if ``name`` is neither
+    a var name nor an obs column."""
+    import pandas as pd
+    from pandas.api import types as pdt
+    adata, bc2row, var_names = expr
+    if name in var_names:                                    # gene -> continuous
+        g = _gene_expr(expr, barcodes, name, layer=layer)
+        if g is None:
+            return None
+        vals, vmax = g
+        return {"name": name, "kind": "cont", "values": vals, "vmax": vmax}
+    if name not in adata.obs.columns:
+        return None
+    s = adata.obs[name]
+    rows = [bc2row.get(bc) for bc in barcodes]
+    is_cat = (isinstance(s.dtype, pd.CategoricalDtype) or pdt.is_object_dtype(s)
+              or pdt.is_bool_dtype(s)
+              or (pdt.is_integer_dtype(s) and int(s.nunique()) <= 100))
+    if not is_cat and pdt.is_numeric_dtype(s):               # numeric obs -> continuous
+        arr = pd.to_numeric(s, errors="coerce").to_numpy()
+        vals = [None if (r is None or arr[r] != arr[r]) else float(arr[r]) for r in rows]
+        fin = [v for v in vals if v is not None]
+        vmax = float(np.quantile(fin, 0.99)) if fin else 1.0
+        return {"name": name, "kind": "cont", "values": vals, "vmax": vmax if vmax > 0 else 1.0}
+    sv = s.astype(str).to_numpy()                            # categorical obs -> discrete
+    cats = sorted(set(sv.tolist()))
+    code = {c: i for i, c in enumerate(cats)}
+    codes = [None if r is None else int(code[sv[r]]) for r in rows]
+    return {"name": name, "kind": "cat", "codes": codes, "categories": cats}
+
+
 def build_app(root, decisions_file=None, reviewer="", h5ad=None, deg_layer=None):
     from fastapi import FastAPI, HTTPException
     from fastapi.responses import FileResponse, HTMLResponse
@@ -579,6 +613,20 @@ def build_app(root, decisions_file=None, reviewer="", h5ad=None, deg_layer=None)
             raise HTTPException(404, f"gene not in h5ad: {gene}")
         vals, vmax = res
         return {"gene": gene, "values": vals, "vmax": vmax}
+
+    @app.get("/api/feature/{name}")
+    def api_feature(name: str):
+        if not h5ad:
+            raise HTTPException(400, "features disabled: restart serve with --h5ad PATH")
+        if not _ensure_cells():
+            raise HTTPException(404, "no cell_coords.tsv.gz")
+        expr = _ensure_expr()
+        if expr is None:
+            raise HTTPException(400, f"could not open DEG h5ad: {h5ad}")
+        res = _feature_payload(expr, app.state.barcodes, name, layer=deg_layer)
+        if res is None:
+            raise HTTPException(404, f"'{name}' is not a gene or an obs column")
+        return res
 
     return app
 
