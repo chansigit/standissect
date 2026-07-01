@@ -477,7 +477,10 @@ python -m standissect run "$H5AD" \
     # --llm-concurrency 24    = all minors share one global pool; tune to your ARK quota
 ```
 
-Then run export-coords + serve against `$RUN/$CCOL` (the new tree root), as above.
+`run` **writes `cell_coords.tsv.gz` into the tree automatically** (from `--umap-key`,
+unless `--no-export-coords`), so you can `serve "$RUN/$CCOL"` straight away — the
+separate `export-coords` step above is only needed to (re)generate coords for an
+*existing* tree, or to swap in a different embedding.
 
 ## Modules
 

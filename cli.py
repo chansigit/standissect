@@ -116,6 +116,10 @@ def _add_common_run_args(parser):
                        help='DEG process-pool size (cross-cluster parallelism).')
     rerun.add_argument('--no-report', action='store_true',
                        help='Skip building report.html after the run.')
+    rerun.add_argument('--no-export-coords', action='store_true',
+                       help='Skip writing cell_coords.tsv.gz (the interactive-UMAP '
+                            'coordinates). By default run emits it from --umap-key so '
+                            'serve has an interactive UMAP with no extra step.')
 
 
 def _force_value(values):
@@ -175,6 +179,18 @@ def run_cmd(args):
         discard_confidence_threshold=args.discard_confidence_threshold,
         random_state=args.random_state,
     )
+    if not args.no_export_coords:
+        from .export_coords import write_coords_from_adata
+        qc = [c for c in (args.doublet_score_col, args.mito_col,
+                          args.feature_count_col, args.umi_count_col) if c]
+        qc += list(args.extra_qc_col or [])
+        try:
+            cc = write_coords_from_adata(adata, result['root'],
+                                         umap_key=args.umap_key, qc_cols=tuple(qc))
+            print(f"[standissect] cell coords: {cc}")
+        except KeyError as e:
+            print(f"[standissect] cell coords skipped ({e}); the tree is fine — "
+                  f"run export-coords with an existing embedding to enable the UMAP")
     if not args.no_report:
         report = build_report(result['root'])
         print(f"[standissect] report: {report}")

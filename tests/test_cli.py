@@ -50,6 +50,15 @@ def test_cli_concurrency_overrides():
     assert (a.llm_concurrency, a.llm_retries, a.ark_timeout, a.n_jobs) == (4, 1, 90, 2)
 
 
+def test_cli_export_coords_default_on():
+    a = build_parser().parse_args(["run", "x.h5ad", "--cluster-col", "leiden",
+                                   "--output-dir", "o"])
+    assert a.no_export_coords is False
+    assert build_parser().parse_args(
+        ["run", "x.h5ad", "--cluster-col", "leiden", "--output-dir", "o",
+         "--no-export-coords"]).no_export_coords is True
+
+
 def test_cli_discard_threshold_default():
     a = build_parser().parse_args(["run", "x.h5ad", "--cluster-col", "leiden",
                                    "--output-dir", "o"])
