@@ -327,11 +327,14 @@ pip install fastapi uvicorn          # run in sh_dev, not on the login node
 > `PYTHONPATH=…` prefix can break `h5py`'s bundled libraries in some venvs, while
 > `cd` + `-m` does not.
 
-**1. (optional) Export per-cell coordinates** for the interactive UMAP. The
-server runs without this — the UMAP tab is simply hidden. It needs an existing
-dissect output tree (from `standissect run`) **and the same `.h5ad` you ran the
-pipeline on**, read with the embedding key your run used (`params.json` →
-`umap_key`). Run it once in `sh_dev`/a job:
+**1. Per-cell coordinates** for the interactive UMAP. `standissect run` now writes
+`cell_coords.tsv.gz` into the tree automatically (from its `--umap-key`, unless
+`--no-export-coords`), so a freshly built tree is ready and you can skip to
+step 2. Run `export-coords` **only** to add coords to a tree that lacks them, or
+to swap in a different embedding — it needs the tree and an `.h5ad` sharing
+barcodes with `cell_labels.tsv`, read with the desired embedding key
+(`params.json` → `umap_key`). The server runs without coords too (the UMAP tab is
+just hidden):
 
 ```bash
 sh_dev
@@ -358,6 +361,9 @@ cd /path/to/parent-of-standissect
 python -m standissect serve out/<cluster_col> --host 127.0.0.1 --port 8050
 # extra flags: --decisions-file PATH (default <root>/human_review.tsv) · --reviewer NAME
 #              --no-replace  (default: a restart auto-stops a prior server on the port)
+#              --h5ad PATH --deg-layer LAYER   (opt-in: enables on-the-fly DEG + gene/
+#                  obs feature colouring; opened lazily, backed. LAYER holds log-norm
+#                  values, e.g. log_normalized; barcodes must match cell_labels.tsv)
 ```
 
 You should see `review server for <cluster_col> -> http://127.0.0.1:8050`. Leave
@@ -413,6 +419,12 @@ ssh -N -L 8050:<compute-node>:8050 chensj16@login.sherlock.stanford.edu
   (cluster-focus mode highlights the minor against `_0`).
 - **lasso / box-select** cells to inspect their composition + QC live, **export
   their barcodes**, or record them as a **manual KEEP/DISCARD set**.
+- with `serve --h5ad`: **Lasso DEG** — in all-clusters view, lasso group A then
+  group B and **Compute** Mann-Whitney differential expression (↑ in A / ↑ in B).
+- with `serve --h5ad`: the **feature box** (next to the view dropdown) colours the
+  UMAP by any **gene or `.obs` column** (numeric → continuous, categorical →
+  discrete + legend), with type-ahead autocomplete; clicking a gene in a DEG
+  result colours by it too.
 
 **Outputs (in the run dir):** `human_review.tsv` (per-minor verdicts),
 `manual_cells.tsv` (hand-picked cells), `selections/selection_*.tsv` (exported
