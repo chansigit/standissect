@@ -2,7 +2,7 @@
 // standissect review — dashboard with inline interactive UMAPs + lasso review.
 
 const STATE = {run: null, cid: null, cells: null, selIndices: [], heat: null,
-  _heatHL: null, degA: null, degB: null, degArm: null, geneExpr: null};
+  _heatHL: null, degA: null, degB: null, degArm: null, geneExpr: null, degMode: false};
 const PALETTE = ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f",
   "#edc948", "#b07aa1", "#ff9da7", "#9c755f", "#bab0ac", "#1f77b4", "#d62728",
   "#2ca02c", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"];
@@ -112,7 +112,7 @@ function renderCluster(d) {
         el("span", {class: "hl-sel"}, "view ", hlSel,
           STATE.run.deg_enabled
             ? el("button", {class: "deg-open", onclick: openDeg,
-                title: "differential expression between two lassoed groups"}, "DEG")
+                title: "differential expression between two lassoed groups (all-clusters view)"}, "Lasso DEG")
             : null)),
       el("div", {class: "hint umaphint"},
         "left-drag = pan · hold Shift + drag = lasso · click = select group · scroll = zoom · double-click = reset"),
@@ -378,6 +378,9 @@ function drawUmap(cid, hl) {
   const inCluster = i => subCats[C.subcluster[i]].startsWith(parPref);
   const isFocus = minor ? (i => subCats[C.subcluster[i]] === minor) : inCluster;
   const gene = STATE.geneExpr;                     // feature-plot mode when set
+  const degMode = STATE.degMode;                   // show the two DEG groups (A/B)
+  const aSet = degMode && STATE.degA ? new Set(STATE.degA) : null;
+  const bSet = degMode && STATE.degB ? new Set(STATE.degB) : null;
 
   function colorOf(i) {
     const s = subCats[C.subcluster[i]];
@@ -389,11 +392,22 @@ function drawUmap(cid, hl) {
   const bg = {x: [], y: [], c: [], s: [], cd: [], t: []};
   const fg = {x: [], y: [], c: [], s: [], cd: [], t: []};
   for (let i = 0; i < N; i++) {
-    const foc = isFocus(i);
+    const inA = aSet && aSet.has(i), inB = bSet && bSet.has(i);
+    const foc = (degMode && (inA || inB)) || isFocus(i);   // DEG groups draw on top
     const d = foc ? fg : bg;
-    d.x.push(C.x[i]); d.y.push(C.y[i]);
-    d.c.push(gene ? (gene.vals[i] == null ? 0 : gene.vals[i]) : colorOf(i));
-    d.s.push(foc ? (minor ? 9 : 6) : (inCluster(i) ? 6 : 3));
+    let color, size;
+    if (gene) {
+      color = gene.vals[i] == null ? 0 : gene.vals[i];
+      size = foc ? (minor ? 9 : 6) : (inCluster(i) ? 6 : 3);
+    } else if (degMode) {
+      color = inA ? "#111827" : inB ? "#e11d48"            // A = ink, B = crimson
+        : PALETTE[C.parent_cluster[i] % PALETTE.length];   // clusters stay visible
+      size = (inA || inB) ? 8 : 3;
+    } else {
+      color = colorOf(i);
+      size = foc ? (minor ? 9 : 6) : (inCluster(i) ? 6 : 3);
+    }
+    d.x.push(C.x[i]); d.y.push(C.y[i]); d.c.push(color); d.s.push(size);
     d.cd.push(i); d.t.push(subCats[C.subcluster[i]]);
   }
   STATE._umapGlobal = global;                     // global view = lasso selects ALL clusters
@@ -557,6 +571,7 @@ function onSelected(ev) {
     if (w === "a") STATE.degA = idx; else STATE.degB = idx;
     STATE.degArm = null;
     _syncDegbar();
+    if (STATE.cid != null) drawUmap(STATE.cid, "__all__");   // colour A/B; dragmode -> pan
     const h = document.getElementById("degHint");
     if (h) h.textContent = (STATE.degA && STATE.degB)
       ? "both groups set — click Compute." : `group ${w.toUpperCase()} set · arm the other.`;
@@ -668,6 +683,10 @@ function openDeg() {
     p.style.top = Math.max(64, window.innerHeight - p.offsetHeight - 24) + "px";
     _makeDegDraggable(p);
   }
+  STATE.degMode = true;                             // DEG works only in all-clusters view
+  const ms = document.getElementById("hlSel");
+  if (ms) { ms.value = "__all__"; ms.disabled = true; }
+  if (STATE.cid != null) drawUmap(STATE.cid, "__all__");
   _syncDegbar();
 }
 
@@ -697,17 +716,22 @@ function _makeDegDraggable(p) {
 function closeDeg() {
   document.getElementById("degpanel").hidden = true;
   STATE.degArm = null;
+  STATE.degMode = false;
+  const ms = document.getElementById("hlSel");
+  if (ms) ms.disabled = false;
   _setArmedUI();
+  if (STATE.cid != null) drawUmap(STATE.cid, currentHl());   // back to normal colouring
 }
 
 function armDeg(which) {
   STATE.degArm = which;
   if (which === "a") STATE.degA = null; else STATE.degB = null;   // re-picking this group
-  const gd = document.getElementById("umap");                     // wipe the prior lasso/highlight
-  if (gd && gd.data) Plotly.restyle(gd, {selectedpoints: [null, null]});
   _syncDegbar();
+  if (STATE.cid != null) drawUmap(STATE.cid, "__all__");          // redraw (drops old colour)
+  const gd = document.getElementById("umap");
+  if (gd && gd.data) Plotly.relayout(gd, "dragmode", "lasso");    // auto lasso — just drag
   const h = document.getElementById("degHint");
-  if (h) h.textContent = `now lasso group ${which.toUpperCase()} on the UMAP (hold Shift + drag).`;
+  if (h) h.textContent = `drag on the UMAP to lasso group ${which.toUpperCase()} (no Shift needed).`;
 }
 
 function _setArmedUI() {
@@ -730,10 +754,9 @@ function clearDeg() {
   STATE.degA = null; STATE.degB = null; STATE.degArm = null;
   const r = document.getElementById("degResult"); if (r) r.innerHTML = "";
   const h = document.getElementById("degHint");
-  if (h) h.textContent = "Lasso A, then Lasso B (hold Shift + drag), then Compute.";
-  const gd = document.getElementById("umap");
-  if (gd && gd.data) Plotly.restyle(gd, {selectedpoints: [null, null]});  // clear the lasso
+  if (h) h.textContent = "Lasso A, then Lasso B, then Compute.";
   _syncDegbar();
+  if (STATE.cid != null) drawUmap(STATE.cid, "__all__");   // drop the A/B colouring
 }
 
 async function computeDeg() {
