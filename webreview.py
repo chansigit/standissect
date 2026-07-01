@@ -628,6 +628,25 @@ def build_app(root, decisions_file=None, reviewer="", h5ad=None, deg_layer=None)
             raise HTTPException(404, f"'{name}' is not a gene or an obs column")
         return res
 
+    @app.get("/api/feature_search")
+    def api_feature_search(q: str = "", limit: int = 25):
+        if not h5ad:
+            return {"names": []}
+        expr = _ensure_expr()
+        if expr is None:
+            return {"names": []}
+        adata, _, var_names = expr
+        obs_cols = [str(c) for c in adata.obs.columns]
+        ql = q.strip().lower()
+        if not ql:                                    # empty -> suggest obs columns
+            return {"names": obs_cols[:limit]}
+        obs_hits = [c for c in obs_cols if ql in c.lower()]
+        if getattr(app.state, "_var_lower", None) is None:
+            app.state._var_lower = [g.lower() for g in var_names]
+        vl = app.state._var_lower
+        gene_hits = [var_names[i] for i, g in enumerate(vl) if g.startswith(ql)]
+        return {"names": (obs_hits + gene_hits)[:limit]}
+
     return app
 
 

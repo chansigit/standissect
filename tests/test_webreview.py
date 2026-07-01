@@ -248,6 +248,27 @@ def test_feature_gene_numeric_and_categorical(tmp_path):
     assert c.get("/api/feature/NOPE").status_code == 404
 
 
+def test_feature_search_autocomplete(tmp_path):
+    pytest.importorskip("anndata")
+    import anndata as ad
+    import numpy as np
+    import scipy.sparse as sp
+    _make_run(tmp_path)
+    bcs = [f"cell{i}" for i in range(9)]
+    obs = pd.DataFrame({"score": [0.1 * i for i in range(9)], "grp": ["x"] * 9}, index=bcs)
+    adata = ad.AnnData(X=sp.csr_matrix(np.zeros((9, 3), dtype=np.float32)), obs=obs,
+                       var=pd.DataFrame(index=["MMP8", "MMP9", "ACTB"]))
+    p = tmp_path / "s.h5ad"
+    adata.write_h5ad(p)
+    c = _client(tmp_path, h5ad=str(p))
+
+    assert set(c.get("/api/feature_search?q=").json()["names"]) == {"score", "grp"}
+    g = c.get("/api/feature_search?q=MMP").json()["names"]
+    assert "MMP8" in g and "MMP9" in g and "ACTB" not in g
+    assert "score" in c.get("/api/feature_search?q=sco").json()["names"]
+    assert _client(tmp_path).get("/api/feature_search?q=MMP").json()["names"] == []
+
+
 def test_index_and_static(tmp_path):
     _make_run(tmp_path)
     c = _client(tmp_path)

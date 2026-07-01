@@ -108,13 +108,16 @@ function renderCluster(d) {
       onchange: () => drawUmap(d.cid, hlSel.value)});
     const featBox = STATE.run.deg_enabled
       ? el("input", {id: "featbox", class: "featbox", placeholder: "colour by gene / obs col…",
+          list: "featlist", autocomplete: "off", spellcheck: "false",
           title: "type a gene name or an .obs column, then Enter",
+          onfocus: _featSuggest, oninput: _featSuggest,
           onkeydown: e => { if (e.key === "Enter") showFeature(e.target.value); }})
       : null;
+    const featList = STATE.run.deg_enabled ? el("datalist", {id: "featlist"}) : null;
     viz.append(el("figure", {},
       el("figcaption", {},
         el("span", {id: "umapcap"}, `UMAP — cluster ${d.cid}`),
-        el("span", {class: "hl-sel"}, "view ", hlSel, featBox,
+        el("span", {class: "hl-sel"}, "view ", hlSel, featBox, featList,
           STATE.run.deg_enabled
             ? el("button", {class: "deg-open", onclick: openDeg,
                 title: "differential expression between two lassoed groups (all-clusters view)"}, "Lasso DEG")
@@ -824,6 +827,22 @@ function renderDeg(d) {
   };
   res.append(el("div", {class: "deg-cols"},
     mk("↑ in A", d.up_in_a, "a"), mk("↑ in B", d.up_in_b, "b")));
+}
+
+// autocomplete: (debounced) fetch matching gene / obs names into the datalist.
+let _featT;
+function _featSuggest(e) {
+  const q = e.target.value;
+  clearTimeout(_featT);
+  _featT = setTimeout(async () => {
+    try {
+      const d = await api(`/api/feature_search?q=${encodeURIComponent(q)}&limit=25`);
+      const dl = document.getElementById("featlist");
+      if (!dl) return;
+      dl.innerHTML = "";
+      for (const n of d.names) dl.append(el("option", {value: n}));
+    } catch (err) { /* ignore */ }
+  }, 140);
 }
 
 // colour the UMAP by a gene OR an .obs column (numeric -> continuous Viridis,
